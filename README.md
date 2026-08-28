@@ -1,12 +1,21 @@
-# `vocoder/` — an AMBE+2 (3600×2450) decoder in C
+# baocoder
 
-A standalone, dependency-free C99 decoder for the half-rate AMBE+2 vocoder DMR
-uses, written as the phase-5 "reimplementation" step of this project: the
-DM-32UV firmware is the oracle, and every block transcribed from it cites the
-stock function and its address.
+A standalone, dependency-free C99 **encoder and decoder for AMBE+2 3600×2450**,
+the half-rate vocoder DMR uses.
+
+What makes it unusual: every quantiser table in it was read out of a Baofeng
+DM-32UV firmware image rather than taken from another open implementation, and
+the pitch quantiser is not a table at all — the radio computes it, so this does
+too, with the radio's own constants. The framing and FEC are transcribed from
+that firmware with the stock function and address cited at every block.
+
+It grew out of `baofeng-dm32uv-reveng`, the Ghidra reverse-engineering project
+for that radio, which holds the program database, the rename ledger and the
+findings this codec rests on. mbelib and JMBE are used here only as oracles to
+test against; no code or data from either ships in the library.
 
 ```
-make          # libambe.a + the ambe_decode / ambe_encode CLIs
+make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
 make test     # 789 422 checks against known-good vectors
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
@@ -167,7 +176,7 @@ The test corpus is six real Baofeng DM-32 transmissions — **2 052** on-air AMB
 frames under DMRA voice privacy (ARC4, AES-128 and AES-256), from
 [`known-key-mbe-samples`](https://github.com/tylerwatt12/known-key-mbe-samples),
 whose README records the DMR captures as coming from a Baofeng DM-32, the same
-radio this project reverse-engineers. The reference side comes from two
+radio whose firmware supplied the tables. The reference side comes from two
 independent implementations:
 
 * **mbelib** — the reference decoder used by DSD, OP25 and SDRangel. Fixtures

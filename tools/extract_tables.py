@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Extract the AMBE+2 quantiser tables from the DM-32UV firmware image.
 
-    tools/extract_tables.py ../firmware/DM32_L01_048_20250821.bin > src/ambe_tables_fw.c
+    tools/extract_tables.py /path/to/DM32_L01_048_20250821.bin > src/ambe_tables_fw.c
+
+or, from the top of the tree:  make tables FIRMWARE=/path/to/image.bin
 
 HOW THE TABLES WERE LOCATED
 ---------------------------

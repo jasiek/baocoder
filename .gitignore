@@ -1,6 +1,7 @@
 third_party/
 *.o
 *.a
+/firmware/
 ambe_decode
 tools/mbe_ref
 tests/test_golay

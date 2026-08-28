@@ -1,8 +1,9 @@
-# AMBE+2 (3600x2450) decoder - build, tests, fixtures.
+# baocoder - AMBE+2 (3600x2450) codec: build, tests, fixtures.
 #
-#   make            build libambe.a and the ambe_decode CLI
+#   make            build libbaocoder.a and the ambe_decode / ambe_encode CLIs
 #   make test       run the unit and known-good-pair tests
 #   make fixtures   regenerate tests/fixtures from upstream sources (needs net)
+#   make tables     re-extract the quantiser tables from a firmware image
 #   make clean
 
 CC      ?= cc
@@ -13,7 +14,7 @@ LDLIBS  += -lm
 SRC     := src/golay.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
            src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_encoder.c src/rc4.c src/aes.c
 OBJ     := $(SRC:.c=.o)
-LIB     := libambe.a
+LIB     := libbaocoder.a
 
 TESTS   := tests/test_golay tests/test_aes tests/test_tables tests/test_fec \
            tests/test_params tests/test_synth tests/test_e2e \
@@ -76,11 +77,23 @@ tools/mbe_ref: tools/mbe_ref.c $(MBELIB)/build/libmbe.a $(LIB)
 fixtures: tools/mbe_ref tools/dmra_decrypt $(SAMPLES)/README.md
 	python3 tools/make_fixtures.py $(SAMPLES) tests/fixtures
 
-# Re-extract the quantiser tables from the radio image.  Needs the firmware,
-# which is not tracked in this repository.
-FIRMWARE ?= ../firmware/DM32_L01_048_20250821.bin
+# Re-extract the quantiser tables from the radio image.  The firmware is not
+# redistributed here, so point FIRMWARE at your own copy:
+#
+#   make tables FIRMWARE=/path/to/DM32_L01_048_20250821.bin
+#
+# The expected image is sha256
+# fda860febfcf1a234eed7fa73272112891074aac83746e4f8dfe224a2a700f8f; the
+# generated file records it so a mismatch is visible in the diff.
+FIRMWARE ?= firmware/DM32_L01_048_20250821.bin
 tables:
-	python3 tools/extract_tables.py $(FIRMWARE) > src/ambe_tables_fw.c
+	@test -f "$(FIRMWARE)" || { \
+	  echo "no firmware image at $(FIRMWARE)"; \
+	  echo "usage: make tables FIRMWARE=/path/to/DM32_L01_048_20250821.bin"; \
+	  exit 1; }
+	python3 tools/extract_tables.py $(FIRMWARE) > src/ambe_tables_fw.c.new
+	@mv src/ambe_tables_fw.c.new src/ambe_tables_fw.c
+	@echo "regenerated src/ambe_tables_fw.c from $(FIRMWARE)"
 
 clean:
 	rm -f $(OBJ) $(LIB) ambe_decode ambe_encode tools/mbe_ref tools/dmra_decrypt $(TESTS)
