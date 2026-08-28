@@ -55,7 +55,8 @@ static void vuv_pattern(int b1, int out[8])
         out[i] = (int)((w >> (30 - 2 * i)) & 1u);
 }
 
-static int run(const char *name, int expect, int *voice_out, int *exact_out)
+static int run(const char *name, int expect, int *voice_out, int *exact_out,
+               int *silence_out)
 {
     FILE *fb = fixture_open(name);
     char bl[128];
@@ -94,7 +95,7 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out)
             CHECK(chk.L == cur.L, "frame %d: L %d -> %d\n", n, cur.L, chk.L);
             CHECK(fabs((double)chk.w0 - cur.w0) < 1e-6,
                   "frame %d: w0 %.9g -> %.9g\n", n, cur.w0, chk.w0);
-            for (l = 1; l <= cur.L && l == l; l++) {
+            for (l = 1; l <= cur.L; l++) {
                 CHECK(chk.Vl[l] == cur.Vl[l],
                       "frame %d: Vl[%d] %d -> %d\n", n, l, cur.Vl[l], chk.Vl[l]);
                 CHECK(fabs((double)chk.log2Ml[l] - cur.log2Ml[l]) < 1e-3,
@@ -176,16 +177,24 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out)
           name, voice - exact_bits - b1_ambiguous - hoc_unused - hoc_tied);
     *voice_out += voice;
     *exact_out += exact_bits;
-    printf("[%s %d/%d bit-identical, %d ambiguous b1, %d unused HOC, %d silence] ",
-           name, exact_bits, voice, b1_ambiguous, hoc_unused, silence);
+    *silence_out += silence;
+    (void)other;
     return n;
 }
 
 int main(void)
 {
-    int voice = 0, exact = 0;
-    run("dm32_arc4_1.ambe49", 360, &voice, &exact);
-    run("dm32_arc4_2.ambe49", 252, &voice, &exact);
-    printf("[total %d/%d voice frames bit-identical] ", exact, voice);
+    t_capture cap[16];
+    int ncap = load_captures(cap, 16), i, voice = 0, exact = 0, frames = 0;
+    int silence = 0;
+    char path[128];
+    CHECK(ncap >= 6, "only %d captures in the manifest\n", ncap);
+    for (i = 0; i < ncap; i++) {
+        capture_path(path, sizeof(path), cap[i].name, ".ambe49");
+        frames += run(path, cap[i].frames, &voice, &exact, &silence);
+    }
+    CHECK(frames >= 2000, "only %d real frames\n", frames);
+    printf("[%d/%d voice frames bit-identical over %d captures; %d frames, "
+           "%d silence] ", exact, voice, ncap, frames, silence);
     return t_done("encoder: parameters -> 49 bits, round trip on real frames");
 }

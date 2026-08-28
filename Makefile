@@ -11,11 +11,11 @@ CPPFLAGS += -Iinclude -Isrc
 LDLIBS  += -lm
 
 SRC     := src/golay.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
-           src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_encoder.c src/rc4.c
+           src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_encoder.c src/rc4.c src/aes.c
 OBJ     := $(SRC:.c=.o)
 LIB     := libambe.a
 
-TESTS   := tests/test_golay tests/test_tables tests/test_fec \
+TESTS   := tests/test_golay tests/test_aes tests/test_tables tests/test_fec \
            tests/test_params tests/test_synth tests/test_e2e \
            tests/test_encode tests/test_encode_sweep tests/test_encode_pcm
 
@@ -37,6 +37,9 @@ ambe_decode: tools/ambe_decode.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
 ambe_encode: tools/ambe_encode.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
+
+tools/dmra_decrypt: tools/dmra_decrypt.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
 tests/%: tests/%.c $(LIB) tests/testutil.h
@@ -70,7 +73,7 @@ $(SAMPLES)/README.md:
 tools/mbe_ref: tools/mbe_ref.c $(MBELIB)/build/libmbe.a $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(MBELIB) $< $(LIB) $(MBELIB)/build/libmbe.a $(LDLIBS) -o $@
 
-fixtures: tools/mbe_ref $(SAMPLES)/README.md
+fixtures: tools/mbe_ref tools/dmra_decrypt $(SAMPLES)/README.md
 	python3 tools/make_fixtures.py $(SAMPLES) tests/fixtures
 
 # Re-extract the quantiser tables from the radio image.  Needs the firmware,
@@ -80,7 +83,7 @@ tables:
 	python3 tools/extract_tables.py $(FIRMWARE) > src/ambe_tables_fw.c
 
 clean:
-	rm -f $(OBJ) $(LIB) ambe_decode ambe_encode tools/mbe_ref $(TESTS)
+	rm -f $(OBJ) $(LIB) ambe_decode ambe_encode tools/mbe_ref tools/dmra_decrypt $(TESTS)
 
 distclean: clean
 	rm -rf $(THIRD)

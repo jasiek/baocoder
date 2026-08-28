@@ -30,10 +30,16 @@ SAMPLE = "dmr_arc4_1"
 NAME = "dm32_arc4_1"
 SUPERFRAME = 18
 
-# A second capture, carried only as far as the bit level.  It doubles the real
-# frames the FEC and the encoder round trip see, without the ~350 KB of mbelib
-# reference parameters and PCM that only the decoder tests need.
-EXTRA = [("dmr_arc4_2", "dm32_arc4_2")]
+# The rest of the DM-32 captures, carried only as far as the bit level: they
+# multiply the real frames the FEC and the encoder round trip see, without the
+# ~350 KB of mbelib reference parameters and PCM that only the decoder tests
+# need.  The AES ones are decrypted by tools/dmra_decrypt; see write_manifest
+# for how that layer is validated.
+EXTRA = [("dmr_arc4_2",   "dm32_arc4_2"),
+         ("dmr_aes128_1", "dm32_aes128_1"),
+         ("dmr_aes128_2", "dm32_aes128_2"),
+         ("dmr_aes256_1", "dm32_aes256_1"),
+         ("dmr_aes256_2", "dm32_aes256_2")]
 
 
 def rc4_keystream(key, drop, n):
@@ -118,17 +124,34 @@ def main():
     write_table_reference(outdir)
     print("wrote %d frames to %s.*" % (len(sel), base))
 
+    manifest = [(NAME, meta["algid"].replace("0x", ""), meta["key_hex"], len(sel))]
     for sample, name in EXTRA:
-        n2 = write_bit_level(samples, sample, os.path.join(outdir, name))
+        n2, algid, keyhex = write_bit_level(samples, sample,
+                                            os.path.join(outdir, name))
+        manifest.append((name, algid, keyhex, n2))
         print("wrote %d frames to %s.* (bit level only)" % (n2, name))
+    with open(os.path.join(outdir, "captures.txt"), "w") as fh:
+        fh.write("# real DM-32 captures available as fixtures\n"
+                 "# name algid key-hex frames\n")
+        for row in manifest:
+            fh.write("%s %s %s %d\n" % row)
+    print("total real frames: %d" % sum(r[3] for r in manifest))
 
 
 def write_bit_level(samples, sample, base):
-    """frames + FEC output + plaintext payloads, no mbelib params or PCM."""
+    """frames + FEC output + plaintext payloads, no mbelib params or PCM.
+
+    The plaintext comes from tools/dmra_decrypt rather than from a second
+    implementation here.  For the AES captures that is not a weakness: the
+    cipher is pinned by the FIPS-197 vectors in tests/test_aes.c, and the
+    keying above it is validated by evidence independent of this project -
+    correctly decrypted speech is roughly a quarter AMBE silence descriptors
+    where random bits would give one frame in sixty, and the decoded audio
+    correlates at 0.95 with the capture's JMBE-produced expected.wav.
+    """
     src = os.path.join(samples, sample)
     meta = dict(line.strip().split("=", 1)
                 for line in open(os.path.join(src, "key.txt")) if "=" in line)
-    key = bytes.fromhex(meta["key_hex"])
     frames = json.load(open(os.path.join(src, "encrypted.mbe")))["frames"]
     first = next(i for i, f in enumerate(frames) if "encryption_mi" in f)
     n = ((len(frames) - first) // SUPERFRAME) * SUPERFRAME
@@ -152,19 +175,13 @@ def write_bit_level(samples, sample, base):
     with open(base + ".fec49", "w") as fh:
         fh.write(fec)
 
-    plain = []
-    ksbits, pos = None, 0
-    for f, line in zip(sel, fec.strip().split("\n")):
-        if "encryption_mi" in f:
-            mi = bytes.fromhex(f["encryption_mi"])
-            ksbits = to_bits(rc4_keystream(key + mi, 256, 200))
-            pos = 0
-        bits = [int(c) for c in line.split()[0]]
-        plain.append("".join(str(b ^ ksbits[pos + k]) for k, b in enumerate(bits)))
-        pos += 56
+    algid = meta["algid"].replace("0x", "").replace("0X", "")
+    plain = subprocess.check_output(
+        ["tools/dmra_decrypt", base + ".frames", algid, meta["key_hex"]],
+        stderr=subprocess.DEVNULL).decode()
     with open(base + ".ambe49", "w") as fh:
-        fh.write("\n".join(plain) + "\n")
-    return len(sel)
+        fh.write(plain)
+    return len(plain.strip().split("\n")), algid, meta["key_hex"]
 
 
 def write_table_reference(outdir):

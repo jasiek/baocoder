@@ -93,6 +93,39 @@ static inline double rms(const short *a, int n)
  * two correct implementations produce different waveforms with the same
  * spectrum; band energies are the right thing to compare.
  */
+/*
+ * The real DM-32 captures available as fixtures, read from the manifest rather
+ * than hard-coded, so adding a capture does not mean editing every test.
+ */
+typedef struct {
+    char name[64];
+    int  algid;
+    char key[80];
+    int  frames;
+} t_capture;
+
+static inline int load_captures(t_capture *out, int max)
+{
+    char line[256];
+    FILE *f = fixture_open("captures.txt");
+    int n = 0;
+    while (n < max && fgets(line, sizeof(line), f)) {
+        if (line[0] == '#')
+            continue;
+        if (sscanf(line, "%63s %x %79s %d", out[n].name, (unsigned *)&out[n].algid,
+                   out[n].key, &out[n].frames) == 4)
+            n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static inline void capture_path(char *dst, size_t n, const char *name,
+                                const char *ext)
+{
+    snprintf(dst, n, "%s%s", name, ext);
+}
+
 #define T_BANDS 16
 
 static inline void band_energies(const short *x, int n, double *out)

@@ -147,15 +147,21 @@ static int run(const char *fname, const char *rname, int expect)
     CHECK((double)total_errs / nframes < 1.0,
           "corrected-error rate %.3f bits/frame is too high for a real capture\n",
           (double)total_errs / nframes);
-    printf("[%d/%d byte-identical, %.2f err/frame] ",
-           identical, nframes, (double)total_errs / nframes);
     return nframes;
 }
 
 int main(void)
 {
-    int a = run("dm32_arc4_1.frames", "dm32_arc4_1.fec49", 360);
-    int b = run("dm32_arc4_2.frames", "dm32_arc4_2.fec49", 252);
-    CHECK(a + b == 612, "expected 612 real frames in total, got %d\n", a + b);
+    t_capture cap[16];
+    int ncap = load_captures(cap, 16), i, total = 0;
+    char fa[128], fb[128];
+    CHECK(ncap >= 6, "only %d captures in the manifest\n", ncap);
+    for (i = 0; i < ncap; i++) {
+        capture_path(fa, sizeof(fa), cap[i].name, ".frames");
+        capture_path(fb, sizeof(fb), cap[i].name, ".fec49");
+        total += run(fa, fb, cap[i].frames);
+    }
+    CHECK(total >= 2000, "only %d real frames across %d captures\n", total, ncap);
+    printf("[%d frames over %d captures] ", total, ncap);
     return t_done("dmr fec: 72 on-air bits -> 49 payload bits");
 }

@@ -7,7 +7,7 @@ stock function and its address.
 
 ```
 make          # libambe.a + the ambe_decode / ambe_encode CLIs
-make test     # 420 868 checks against known-good vectors
+make test     # 789 422 checks against known-good vectors
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -29,7 +29,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
 | Quantiser codebooks, voicing patterns, block lengths | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
 | Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |
-| DMRA ARC4 voice privacy | `src/rc4.c` | needed only to decode the encrypted test capture |
+| DMRA voice privacy (ARC4, AES-128/256) | `src/rc4.c`, `src/aes.c` | needed only to decode the encrypted test captures |
 | Quantisation (params -> 49 bits) | `src/ambe_encode_params.c` | exact inverse of the decoder, searching the firmware's codebooks |
 | Analysis (PCM -> params) | `src/ambe_analysis.c` | **ours**, not the firmware's — see below |
 
@@ -163,8 +163,8 @@ become 24 + 23 + 25 = 72 on-air bits.
 
 ## Testing: what "known-good pair" means here
 
-The test corpus is two real Baofeng DM-32 transmissions — 612 consecutive on-air
-AMBE frames with DMRA Enhanced Privacy (ARC4), from
+The test corpus is six real Baofeng DM-32 transmissions — **2 052** on-air AMBE
+frames under DMRA voice privacy (ARC4, AES-128 and AES-256), from
 [`known-key-mbe-samples`](https://github.com/tylerwatt12/known-key-mbe-samples),
 whose README records the DMR captures as coming from a Baofeng DM-32, the same
 radio this project reverse-engineers. The reference side comes from two
@@ -177,13 +177,14 @@ independent implementations:
 
 | Test | What is compared | Result |
 |---|---|---|
+| `test_aes` | AES against the FIPS-197 Appendix B and C vectors, all three key lengths, plus the DMRA IV expansion | 92 checks |
 | `test_golay` | the Golay code's defining property, exhaustively: 2048 syndromes ↔ 2048 error patterns of weight ≤ 3, all corrected; minimum distance 7; systematic encoding | 30 720 checks |
 | `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 124 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` 2.4e-3 / `L` 119/120 |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
 | `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 3.9e-4, γ 2.7e-4, Ml 5.0e-3; **0** L divergences |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
-| `test_e2e` | on-air bytes → FEC → ARC4 → audio, against JMBE's `expected.wav` | mean band correlation **0.970**, level-envelope correlation **0.975** |
-| `test_encode` | decode 612 real frames from two captures to parameters, re-quantise, demand the radio's own bits back | **380/470** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
+| `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.965** across six captures |
+| `test_encode` | decode 2 052 real frames from six captures to parameters, re-quantise, demand the radio's own bits back | **1 354/1 664** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
 | `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames |
 | `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **172/191**, **1** octave error, level ×0.91 |
 
@@ -211,12 +212,25 @@ non-determinism.
 
 ### The decryption is itself evidence
 
-DMRA Enhanced Privacy keying — RC4 over `key ‖ MI`, 256 keystream bytes
-discarded, 49 bits consumed and 7 skipped per frame, re-seeded every 18-frame
-superframe — is reconstructed in `src/rc4.c`. That it is right is visible
-without any reference: 111 of the 360 decrypted frames decode to the AMBE
-silence descriptor (`b0` = 124 or 125), which random bits would produce about
-three times in 360. The speech has pauses in it.
+Three DMRA privacy modes are reconstructed, in `src/rc4.c` and `src/aes.c`:
+
+* **ARC4** (ALGID 0x21) — RC4 over `key ‖ MI`, 256 keystream bytes discarded.
+* **AES-128/256** (0x24 / 0x25) — OFB from a 128-bit IV that the 32-bit message
+  indicator is expanded into by an LFSR with taps {32, 22, 2, 1}, with the first
+  cipher block discarded.
+
+All three consume 49 bits and skip 7 per frame, re-keyed every 18-frame
+superframe. The cipher itself is pinned by the FIPS-197 vectors in `test_aes`;
+the keying above it is validated by evidence that owes nothing to this project —
+**speech has a continuous pitch track**. The mean step between consecutive
+frames' `b0` runs 3.9 to 16.4 across the six captures, where randomly keyed bits
+give 39.4, the expected mean absolute difference of two uniform draws over the
+120 voice indices.
+
+The silence-descriptor rate was tried first as the discriminator and rejected:
+it ranges from 4.8% to 30.8% here, because some of these captures are continuous
+speech, so it does not separate cleanly from chance. Recording the rejected
+statistic matters as much as the accepted one.
 
 ## Fixtures
 
@@ -291,8 +305,8 @@ Adding the second capture was not just more of the same: it contained frames
 with small enough `L` that some prediction blocks carry no higher-order
 coefficients at all, a path the first capture never exercised.
 
-Still thin, and honestly so: **1 tone frame and 1 erasure frame** in 612. Those
-paths are structurally simple — classify and mute — but they are barely
+Still thin, and honestly so: **2 tone frames and 3 erasure frames** in 2 052.
+Those paths are structurally simple — classify and mute — but they are barely
 exercised by real data.
 
 ## Limitations
