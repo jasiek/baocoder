@@ -6,8 +6,8 @@ DM-32UV firmware is the oracle, and every block transcribed from it cites the
 stock function and its address.
 
 ```
-make          # libambe.a + the ambe_decode CLI
-make test     # 110 428 checks against known-good vectors
+make          # libambe.a + the ambe_decode / ambe_encode CLIs
+make test     # 131 524 checks against known-good vectors
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -15,6 +15,8 @@ make tables   # re-extract the quantiser tables from the firmware image
 ```
 ./ambe_decode -k CDEFAB1234 tests/fixtures/dm32_arc4_1.frames out.wav
 360 frames, 7.20 s: 111 silence, 1 erasure, 0.24 corrected bits/frame
+
+./ambe_encode speech.wav frames.txt && ./ambe_decode frames.txt back.wav
 ```
 
 ## What is here
@@ -28,6 +30,8 @@ make tables   # re-extract the quantiser tables from the firmware image
 | Quantiser codebooks, voicing patterns, block lengths | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
 | Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |
 | DMRA ARC4 voice privacy | `src/rc4.c` | needed only to decode the encrypted test capture |
+| Quantisation (params -> 49 bits) | `src/ambe_encode_params.c` | exact inverse of the decoder, searching the firmware's codebooks |
+| Analysis (PCM -> params) | `src/ambe_analysis.c` | **ours**, not the firmware's — see below |
 
 The public API is `include/ambe.h`. The library has no dependencies beyond
 `libm`; `tools/mbe_ref.c` links mbelib but is only used to regenerate fixtures
@@ -179,6 +183,8 @@ independent implementations:
 | `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 3.9e-4, γ 2.7e-4, Ml 5.0e-3; **0** L divergences |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
 | `test_e2e` | on-air bytes → FEC → ARC4 → audio, against JMBE's `expected.wav` | mean band correlation **0.970**, level-envelope correlation **0.975** |
+| `test_encode` | decode 360 real frames to parameters, re-quantise, demand the radio's own bits back | **220/247** bit-identical; the other 27 differ only in b1, and all 247 re-decode to identical parameters |
+| `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **172/191**, **1** octave error, level ×0.91 |
 
 `test_params` is the load-bearing pipeline test. The AMBE spectral envelope is
 coded differentially against the previous frame, so one wrong bit position or
@@ -219,10 +225,53 @@ no licence, so it is fetched into `third_party/` by `make fixtures` rather than
 vendored; `test_e2e` skips its audio comparison when it is absent and still
 runs everything else.
 
+## The encoder
+
+Both directions work. The channel-coding half was already there —
+`ambe_fec_encode` is tested as the exact inverse of the decoder — and the two
+new pieces are quantisation and analysis, which sit at very different confidence
+levels.
+
+**Quantisation (`ambe_encode_params.c`) is the firmware's, and is verified
+bit-exactly.** It inverts the decoder exactly and searches the extracted
+codebooks for the nearest entry, which is what the stock code does too:
+`Vocoder_CodeSpectralCoefficients` `0x000220D4` and
+`Vocoder_CodebookVectorLookup` `0x0002369C` take a direction flag, and on the
+encode side the lookup searches and emits an index with `Dsp_UnpackBitsAdvance`
+instead of reading one with `Dsp_PackBitsAdvance`.
+
+Inverting the envelope stage is the only subtle part. With `P[l]` the weighted
+resampled previous frame and `D[l] = log2Ml[l] - P[l] + mean(P)`:
+
+```
+D[l]        = Tl[l] - mean(Tl) + gamma - 0.5*log2(L)
+mean(D)     = gamma - 0.5*log2(L)        -> gamma recovered
+D - mean(D) = Tl - mean(Tl)              -> Tl up to its mean
+```
+
+`mean(Tl)` is genuinely not transmitted — adding a constant to every `Tl`
+cancels in the decoder. That costs nothing, because the constant only moves
+`Gm[1]`, which the codec pins to zero: adding `c` to each block's DC adds `c` to
+every `Ri`, and `sum_i cos(pi*(m-1)*(i-0.5)/8) = 0` for every `m > 1`. So
+`Gm[2..8]` — all that b3 and b4 carry — is exactly recoverable.
+
+**Analysis (`ambe_analysis.c`) is ours, not the firmware's.** The stock analyser
+is a dense fixed-point multi-candidate search spread across
+`Vocoder_SelectVoicingCandidate` `0x000177F0`, `Vocoder_RefinePitchEstimate`
+`0x00025A60` and `Dsp_WindowAndComputeFft` `0x00019B6C`; what is here is a
+conventional MBE estimator producing the same parameter set — normalised
+cross-correlation pitch over lags 20..123 (exactly the span the pitch quantiser
+covers), per-band voicing from harmonic energy concentration, and RMS spectral
+amplitudes from a Hamming-windowed 256-point DFT. It is honest work, not a
+transcription, and the tests are scaled to that.
+
 ## Limitations
 
-* Decoder only. `ambe_fec_encode` exists and is tested as the inverse of the
-  decoder, but there is no analysis/encoder side.
+* The analyser is a conventional MBE estimator, not the firmware's search, so
+  encoded audio is not bit-identical to what the radio would produce from the
+  same input — only the quantiser below it is exact.
+* b1 is not uniquely recoverable when a frame's voicing is degenerate: the
+  32-entry table has only 13 distinct 8-band patterns.
 * 3600×2450 (DMR) only. The 3600×2400 D-STAR variant and the IMBE 7200×4400
   used by P25 Phase 1 are not implemented.
 * Tone frames (`b0` = 126/127) are classified and muted, not synthesised.

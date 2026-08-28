@@ -133,6 +133,49 @@ void ambe_synthesize(float out[AMBE_PCM_SAMPLES], ambe_parms *cur,
 
 void ambe_float_to_s16(const float in[AMBE_PCM_SAMPLES], int16_t out[AMBE_PCM_SAMPLES]);
 
+/* --------------------------------------------------------------- encoder */
+
+/*
+ * Quantise a model parameter set into the nine AMBE indices and pack them into
+ * the 49-bit payload.  Exact inverse of ambe_decode_parms: `prev` must carry
+ * the same previous-frame state the decoder would have, since the spectral
+ * envelope is differentially coded.  `prev` is updated the same way.
+ * `info->b[]` receives the chosen indices.  Returns 0.
+ */
+int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
+                      uint8_t ambe_d[AMBE_BITS], ambe_frame_info *info);
+
+/* Emit the silence descriptor (b0 = 124) instead of a voice frame. */
+void ambe_encode_silence(uint8_t ambe_d[AMBE_BITS]);
+
+/*
+ * Analysis: 160 PCM samples at 8 kHz -> model parameters.  `hist` holds the
+ * analyser's overlap state and must be zeroed before the first frame.
+ */
+#define AMBE_ANALYSIS_HISTORY 256
+
+typedef struct {
+    float win[AMBE_ANALYSIS_HISTORY];   /* sliding input window */
+    int   primed;
+} ambe_analysis;
+
+void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
+                  ambe_parms *out);
+
+typedef struct ambe_encoder ambe_encoder;
+
+ambe_encoder *ambe_encoder_create(void);
+void          ambe_encoder_destroy(ambe_encoder *e);
+void          ambe_encoder_reset(ambe_encoder *e);
+
+/* 160 PCM samples -> 49 payload bits. */
+int ambe_encode_bits(ambe_encoder *e, const int16_t pcm[AMBE_PCM_SAMPLES],
+                     uint8_t ambe_d[AMBE_BITS], ambe_frame_info *info);
+
+/* 160 PCM samples -> 9 on-air DMR bytes. */
+int ambe_encode_dmr_frame(ambe_encoder *e, const int16_t pcm[AMBE_PCM_SAMPLES],
+                          uint8_t frame[AMBE_DMR_BYTES], ambe_frame_info *info);
+
 /* ------------------------------------------------------------ top level */
 
 ambe_decoder *ambe_decoder_create(void);

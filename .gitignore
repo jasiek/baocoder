@@ -10,3 +10,6 @@ tests/test_params
 tests/test_synth
 tests/test_e2e
 *.dSYM/
+tests/test_encode
+tests/test_encode_pcm
+ambe_encode

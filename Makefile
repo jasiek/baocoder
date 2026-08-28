@@ -10,13 +10,14 @@ CFLAGS  ?= -O2 -g -std=c99 -Wall -Wextra -Wno-unused-parameter
 CPPFLAGS += -Iinclude -Isrc
 LDLIBS  += -lm
 
-SRC     := src/golay.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
-           src/ambe_tables_fw.c src/ambe_decoder.c src/rc4.c
+SRC     := src/golay.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
+           src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_encoder.c src/rc4.c
 OBJ     := $(SRC:.c=.o)
 LIB     := libambe.a
 
 TESTS   := tests/test_golay tests/test_tables tests/test_fec \
-           tests/test_params tests/test_synth tests/test_e2e
+           tests/test_params tests/test_synth tests/test_e2e \
+           tests/test_encode tests/test_encode_pcm
 
 THIRD   := third_party
 MBELIB  := $(THIRD)/mbelib
@@ -24,7 +25,7 @@ SAMPLES := $(THIRD)/known-key-mbe-samples
 
 .PHONY: all test fixtures tables clean distclean
 
-all: $(LIB) ambe_decode
+all: $(LIB) ambe_decode ambe_encode
 
 $(LIB): $(OBJ)
 	$(AR) rcs $@ $^
@@ -33,6 +34,9 @@ $(LIB): $(OBJ)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 ambe_decode: tools/ambe_decode.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
+
+ambe_encode: tools/ambe_encode.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
 tests/%: tests/%.c $(LIB) tests/testutil.h
@@ -76,7 +80,7 @@ tables:
 	python3 tools/extract_tables.py $(FIRMWARE) > src/ambe_tables_fw.c
 
 clean:
-	rm -f $(OBJ) $(LIB) ambe_decode tools/mbe_ref $(TESTS)
+	rm -f $(OBJ) $(LIB) ambe_decode ambe_encode tools/mbe_ref $(TESTS)
 
 distclean: clean
 	rm -rf $(THIRD)

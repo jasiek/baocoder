@@ -35,6 +35,7 @@
 #include <string.h>
 #include "ambe.h"
 #include "ambe_tables.h"
+#include "ambe_bitpos.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -115,15 +116,24 @@ static int bits_to_int(const uint8_t *d, const int *idx, int n)
 }
 
 /* Bit positions of each quantiser index inside the 49-bit payload. */
-static const int B0_IDX[7] = {  0,  1,  2,  3, 37, 38, 39 };
-static const int B1_IDX[5] = {  4,  5,  6,  7, 35 };
-static const int B2_IDX[5] = {  8,  9, 10, 11, 36 };
-static const int B3_IDX[9] = { 12, 13, 14, 15, 16, 17, 18, 19, 40 };
-static const int B4_IDX[7] = { 20, 21, 22, 23, 41, 42, 43 };
-static const int B5_IDX[5] = { 24, 25, 26, 27, 44 };
-static const int B6_IDX[4] = { 28, 29, 30, 45 };
-static const int B7_IDX[4] = { 31, 32, 33, 46 };
-static const int B8_IDX[3] = { 34, 47, 48 };
+const int ambe_b0_idx[7] = {  0,  1,  2,  3, 37, 38, 39 };
+const int ambe_b1_idx[5] = {  4,  5,  6,  7, 35 };
+const int ambe_b2_idx[5] = {  8,  9, 10, 11, 36 };
+const int ambe_b3_idx[9] = { 12, 13, 14, 15, 16, 17, 18, 19, 40 };
+const int ambe_b4_idx[7] = { 20, 21, 22, 23, 41, 42, 43 };
+const int ambe_b5_idx[5] = { 24, 25, 26, 27, 44 };
+const int ambe_b6_idx[4] = { 28, 29, 30, 45 };
+const int ambe_b7_idx[4] = { 31, 32, 33, 46 };
+const int ambe_b8_idx[3] = { 34, 47, 48 };
+#define B0_IDX ambe_b0_idx
+#define B1_IDX ambe_b1_idx
+#define B2_IDX ambe_b2_idx
+#define B3_IDX ambe_b3_idx
+#define B4_IDX ambe_b4_idx
+#define B5_IDX ambe_b5_idx
+#define B6_IDX ambe_b6_idx
+#define B7_IDX ambe_b7_idx
+#define B8_IDX ambe_b8_idx
 
 void ambe_move_parms(const ambe_parms *src, ambe_parms *dst)
 {
