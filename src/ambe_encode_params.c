@@ -100,7 +100,7 @@ int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
 {
     int b[9];
     int i, j, k, l, L, b0;
-    int Ji[5], intkl[AMBE_MAX_HARMONICS + 1];
+    int Ji[5], intkl[AMBE_MAX_HARMONICS + 1], nextkl;
     float f0, unvc;
     float P[AMBE_MAX_HARMONICS + 1], D[AMBE_MAX_HARMONICS + 1];
     float Tl[AMBE_MAX_HARMONICS + 1];
@@ -155,8 +155,11 @@ int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
         flokl     = ((float)prev->L / (float)L) * (float)l;
         intkl[l]  = (int)flokl;
         deltal[l] = flokl - (float)intkl[l];
+        /* As in the decoder: intkl reaches AMBE_MAX_HARMONICS only when
+           prev->L == L == 56, where deltal is exactly zero. */
+        nextkl     = intkl[l] < AMBE_MAX_HARMONICS ? intkl[l] + 1 : intkl[l];
         P[l] = 0.65f * ((1.0f - deltal[l]) * prev->log2Ml[intkl[l]] +
-                        deltal[l] * prev->log2Ml[intkl[l] + 1]);
+                        deltal[l] * prev->log2Ml[nextkl]);
         meanP += P[l];
     }
     meanP /= (double)L;

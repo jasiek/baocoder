@@ -177,7 +177,7 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
 {
     int b0, b1, b2, b3, b4, b5, b6, b7, b8;
     int i, j, k, l, L, silence = 0;
-    int Ji[5], intkl[AMBE_MAX_HARMONICS + 1];
+    int Ji[5], intkl[AMBE_MAX_HARMONICS + 1], nextkl[AMBE_MAX_HARMONICS + 1];
     float f0, unvc;
     float Gm[9], Ri[9], Cik[5][18], Tl[AMBE_MAX_HARMONICS + 1];
     float flokl[AMBE_MAX_HARMONICS + 1], deltal[AMBE_MAX_HARMONICS + 1];
@@ -330,8 +330,12 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         flokl[l]  = ((float)prev->L / (float)cur->L) * (float)l;
         intkl[l]  = (int)flokl[l];
         deltal[l] = flokl[l] - (float)intkl[l];
+        /* intkl reaches AMBE_MAX_HARMONICS only when prev->L == cur->L == 56,
+           and there deltal is exactly zero, so holding the index leaves the
+           sum unchanged and keeps the upper tap inside the array. */
+        nextkl[l] = intkl[l] < AMBE_MAX_HARMONICS ? intkl[l] + 1 : intkl[l];
         Sum43 += (1.0f - deltal[l]) * prev->log2Ml[intkl[l]] +
-                 deltal[l] * prev->log2Ml[intkl[l] + 1];
+                 deltal[l] * prev->log2Ml[nextkl[l]];
     }
     Sum43 = (0.65f / (float)cur->L) * Sum43;
 
@@ -344,7 +348,7 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
 
     for (l = 1; l <= cur->L; l++) {
         c1 = 0.65f * (1.0f - deltal[l]) * prev->log2Ml[intkl[l]];
-        c2 = 0.65f * deltal[l] * prev->log2Ml[intkl[l] + 1];
+        c2 = 0.65f * deltal[l] * prev->log2Ml[nextkl[l]];
         cur->log2Ml[l] = Tl[l] + c1 + c2 - Sum43 + BigGamma;
         if (cur->Vl[l])
             cur->Ml[l] = (float)exp(0.693 * (double)cur->log2Ml[l]);

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" CC=${{ matrix.cc }}
+
+      - name: Test
+        run: make test CC=${{ matrix.cc }}
+
+  sanitizers:
+    name: ubuntu-latest / clang + asan,ubsan
+    runs-on: ubuntu-latest
+    env:
+      # -fsanitize is passed via CFLAGS, which the Makefile also uses on its
+      # link lines, so the runtimes get linked in too.
+      CFLAGS: -O1 -g -std=c99 -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -fno-omit-frame-pointer
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: make test CC=clang
