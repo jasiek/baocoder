@@ -27,7 +27,25 @@
  */
 #include "ambe.h"
 #include "ambe_tables.h"
+#include <math.h>
 #include "testutil.h"
+
+/* how many higher-order coefficients block `block` of an L-harmonic frame uses */
+static int hoc_dims(int L, int block)
+{
+    int ji = ambe_lmprbl[L * 4 + block];
+    int nb = (ji > 6 ? 6 : ji) - 2;
+    return nb < 0 ? 0 : nb;
+}
+
+static int hoc_equal(const short *tbl, int a, int b, int dim)
+{
+    int k;
+    for (k = 0; k < dim; k++)
+        if (tbl[a * 4 + k] != tbl[b * 4 + k])
+            return 0;
+    return 1;
+}
 
 static void vuv_pattern(int b1, int out[8])
 {
@@ -37,13 +55,13 @@ static void vuv_pattern(int b1, int out[8])
         out[i] = (int)((w >> (30 - 2 * i)) & 1u);
 }
 
-int main(void)
+static int run(const char *name, int expect, int *voice_out, int *exact_out)
 {
-    FILE *fb = fixture_open("dm32_arc4_1.ambe49");
+    FILE *fb = fixture_open(name);
     char bl[128];
     ambe_parms cur, prev, prev_enh;
     int n = 0, voice = 0, silence = 0, other = 0;
-    int exact_bits = 0, b1_ambiguous = 0;
+    int exact_bits = 0, b1_ambiguous = 0, hoc_unused = 0, hoc_tied = 0;
     int i;
 
     ambe_init_parms(&cur, &prev, &prev_enh);
@@ -96,6 +114,30 @@ int main(void)
                           "frame %d: b1 %d -> %d with a different pattern\n",
                           n, dinfo.b[1], einfo.b[1]);
                     b1_ambiguous++;
+                } else if (i >= 5) {
+                    /*
+                     * A prediction block short enough to have no higher-order
+                     * coefficients (Ji <= 2) means the decoder never reads that
+                     * index, so it is not recoverable and the encoder emits 0.
+                     * Where the block uses fewer than four coefficients, another
+                     * codebook entry agreeing on the used ones is equivalent.
+                     */
+                    static const short *hoc[5];
+                    int dim;
+                    hoc[1] = ambe_hoc_b5_q11; hoc[2] = ambe_hoc_b6_q11;
+                    hoc[3] = ambe_hoc_b7_q11; hoc[4] = ambe_hoc_b8_q11;
+                    dim = hoc_dims(cur.L, i - 5);
+                    if (dim == 0) {
+                        CHECK(einfo.b[i] == 0,
+                              "frame %d: unused b%d emitted as %d not 0\n",
+                              n, i, einfo.b[i]);
+                        hoc_unused++;
+                    } else {
+                        CHECK(hoc_equal(hoc[i - 4], einfo.b[i], dinfo.b[i], dim),
+                              "frame %d: b%d %d -> %d differs within %d used dims\n",
+                              n, i, dinfo.b[i], einfo.b[i], dim);
+                        hoc_tied++;
+                    }
                 } else {
                     CHECK(0, "frame %d: b%d %d -> %d\n",
                           n, i, dinfo.b[i], einfo.b[i]);
@@ -127,13 +169,23 @@ int main(void)
     }
     fclose(fb);
 
-    CHECK(n == 360, "expected 360 frames, read %d\n", n);
-    CHECK(voice > 200, "only %d voice frames\n", voice);
-    CHECK(exact_bits + b1_ambiguous >= voice,
-          "%d frames were neither bit-identical nor an accepted b1 tie\n",
-          voice - exact_bits - b1_ambiguous);
-    printf("[%d/%d voice frames bit-identical, %d differ only by an ambiguous "
-           "b1; %d silence] ", exact_bits, voice, b1_ambiguous, silence);
+    CHECK(n == expect, "%s: expected %d frames, read %d\n", name, expect, n);
+    CHECK(voice > 100, "%s: only %d voice frames\n", name, voice);
+    CHECK(exact_bits + b1_ambiguous + hoc_unused + hoc_tied >= voice,
+          "%s: %d frames differed for no accepted reason\n",
+          name, voice - exact_bits - b1_ambiguous - hoc_unused - hoc_tied);
+    *voice_out += voice;
+    *exact_out += exact_bits;
+    printf("[%s %d/%d bit-identical, %d ambiguous b1, %d unused HOC, %d silence] ",
+           name, exact_bits, voice, b1_ambiguous, hoc_unused, silence);
+    return n;
+}
 
+int main(void)
+{
+    int voice = 0, exact = 0;
+    run("dm32_arc4_1.ambe49", 360, &voice, &exact);
+    run("dm32_arc4_2.ambe49", 252, &voice, &exact);
+    printf("[total %d/%d voice frames bit-identical] ", exact, voice);
     return t_done("encoder: parameters -> 49 bits, round trip on real frames");
 }

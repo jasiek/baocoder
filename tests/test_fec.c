@@ -34,10 +34,10 @@ static void air_to_flat_ref(const uint8_t frame[AMBE_DMR_BYTES], uint8_t f[72])
     }
 }
 
-int main(void)
+static int run(const char *fname, const char *rname, int expect)
 {
-    FILE *ff = fixture_open("dm32_arc4_1.frames");
-    FILE *fr = fixture_open("dm32_arc4_1.fec49");
+    FILE *ff = fixture_open(fname);
+    FILE *fr = fixture_open(rname);
     char fl[256], rl[256];
     int nframes = 0, identical = 0;
     long total_errs = 0;
@@ -135,20 +135,27 @@ int main(void)
     fclose(ff);
     fclose(fr);
 
-    CHECK(nframes == 360, "expected 360 frames, read %d\n", nframes);
+    CHECK(nframes == expect, "expected %d frames, read %d\n", expect, nframes);
     /*
      * Most frames should re-encode byte for byte.  They do not all, because a
      * bit error landing in the Golay parity is repaired without being counted;
-     * 269 of 360 on this capture.  The floor is a sanity check on the capture,
-     * not on the codec.
+     * 269 of 360 on the first capture.  The floor is a sanity check on the
+     * captures, not on the codec.
      */
     CHECK(identical * 100 >= nframes * 60,
           "only %d of %d frames re-encoded byte-identically\n", identical, nframes);
-    printf("[%d/%d frames re-encode byte-identically, %.2f corrected bits/frame] ",
-           identical, nframes, (double)total_errs / nframes);
     CHECK((double)total_errs / nframes < 1.0,
           "corrected-error rate %.3f bits/frame is too high for a real capture\n",
           (double)total_errs / nframes);
+    printf("[%d/%d byte-identical, %.2f err/frame] ",
+           identical, nframes, (double)total_errs / nframes);
+    return nframes;
+}
 
+int main(void)
+{
+    int a = run("dm32_arc4_1.frames", "dm32_arc4_1.fec49", 360);
+    int b = run("dm32_arc4_2.frames", "dm32_arc4_2.fec49", 252);
+    CHECK(a + b == 612, "expected 612 real frames in total, got %d\n", a + b);
     return t_done("dmr fec: 72 on-air bits -> 49 payload bits");
 }

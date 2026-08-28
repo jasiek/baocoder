@@ -7,7 +7,7 @@ stock function and its address.
 
 ```
 make          # libambe.a + the ambe_decode / ambe_encode CLIs
-make test     # 131 524 checks against known-good vectors
+make test     # 420 868 checks against known-good vectors
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -163,7 +163,7 @@ become 24 + 23 + 25 = 72 on-air bits.
 
 ## Testing: what "known-good pair" means here
 
-The test corpus is a real Baofeng DM-32 transmission — 360 consecutive on-air
+The test corpus is two real Baofeng DM-32 transmissions — 612 consecutive on-air
 AMBE frames with DMRA Enhanced Privacy (ARC4), from
 [`known-key-mbe-samples`](https://github.com/tylerwatt12/known-key-mbe-samples),
 whose README records the DMR captures as coming from a Baofeng DM-32, the same
@@ -183,7 +183,8 @@ independent implementations:
 | `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 3.9e-4, γ 2.7e-4, Ml 5.0e-3; **0** L divergences |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
 | `test_e2e` | on-air bytes → FEC → ARC4 → audio, against JMBE's `expected.wav` | mean band correlation **0.970**, level-envelope correlation **0.975** |
-| `test_encode` | decode 360 real frames to parameters, re-quantise, demand the radio's own bits back | **220/247** bit-identical; the other 27 differ only in b1, and all 247 re-decode to identical parameters |
+| `test_encode` | decode 612 real frames from two captures to parameters, re-quantise, demand the radio's own bits back | **380/470** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
+| `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames |
 | `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **172/191**, **1** octave error, level ×0.91 |
 
 `test_params` is the load-bearing pipeline test. The AMBE spectral envelope is
@@ -265,13 +266,47 @@ covers), per-band voicing from harmonic energy concentration, and RMS spectral
 amplitudes from a Hamming-windowed 256-point DFT. It is honest work, not a
 transcription, and the tests are scaled to that.
 
+## How much of the codec the tests actually reach
+
+Worth stating plainly, because "360 real frames" sounds like more coverage than
+it is. Seven seconds of one person talking visits only part of the quantiser
+space:
+
+| field | codebook | entries reached by the real capture |
+|---|---|---|
+| b3 | PRBA24, 512 | 181 — **35%** |
+| b4 | PRBA58, 128 | 112 — 88% |
+| b2 | gain, 32 | 16 — **50%** |
+| b0 | pitch, 128 | 52 — 41% |
+| L | 48 rows | 32 — **67%** |
+
+More speech does not fix this: real audio concentrates on common entries and
+never reaches the tail. So `test_encode_sweep` synthesises frames that step each
+codebook by a coprime stride, covering **every entry of all nine codebooks and
+all 48 harmonic counts** — coverage no recording can provide. The real captures
+remain the more meaningful test, because they are bits a radio actually
+transmitted; the sweep is what makes the coverage complete.
+
+Adding the second capture was not just more of the same: it contained frames
+with small enough `L` that some prediction blocks carry no higher-order
+coefficients at all, a path the first capture never exercised.
+
+Still thin, and honestly so: **1 tone frame and 1 erasure frame** in 612. Those
+paths are structurally simple — classify and mute — but they are barely
+exercised by real data.
+
 ## Limitations
 
 * The analyser is a conventional MBE estimator, not the firmware's search, so
   encoded audio is not bit-identical to what the radio would produce from the
   same input — only the quantiser below it is exact.
 * b1 is not uniquely recoverable when a frame's voicing is degenerate: the
-  32-entry table has only 13 distinct 8-band patterns.
+  32-entry table has only 13 distinct 8-band patterns, and bands no harmonic
+  maps to are never read.
+* b5..b8 are not recoverable for a prediction block with no higher-order
+  coefficients (`Ji <= 2`); the encoder emits 0, which is what the decoder
+  ignores.
+* Tone and erasure frames are barely represented in the corpus.
 * 3600×2450 (DMR) only. The 3600×2400 D-STAR variant and the IMBE 7200×4400
   used by P25 Phase 1 are not implemented.
 * Tone frames (`b0` = 126/127) are classified and muted, not synthesised.

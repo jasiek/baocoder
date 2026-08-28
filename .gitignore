@@ -13,3 +13,4 @@ tests/test_e2e
 tests/test_encode
 tests/test_encode_pcm
 ambe_encode
+tests/test_encode_sweep
