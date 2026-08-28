@@ -139,7 +139,8 @@ def write_table_reference(outdir):
             ("hoc_b5", "AmbeHOCb5[32][4]"), ("hoc_b6", "AmbeHOCb6[16][4]"),
             ("hoc_b7", "AmbeHOCb7[16][4]"), ("hoc_b8", "AmbeHOCb8[8][4]"),
             ("dg", "AmbeDg[32]"), ("lmprbl", "AmbeLmprbl[57][4]"),
-            ("vuv", "const int AmbeVuv[32][8]")]
+            ("vuv", "const int AmbeVuv[32][8]"),
+            ("w0", "AmbeW0table[120]"), ("ltab", "AmbeLtable[120]")]
     with open(os.path.join(outdir, "mbelib_tables.txt"), "w") as fh:
         fh.write("# mbelib reference values for the tables extracted from the "
                  "firmware image.\n# one table per line: name count v0 v1 ...\n")

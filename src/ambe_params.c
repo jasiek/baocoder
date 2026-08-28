@@ -40,6 +40,72 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/*
+ * Fundamental frequency and harmonic count from b0.
+ *
+ * The firmware does not tabulate either.  It evaluates a closed-form law, and
+ * these are its constants, read out of the image:
+ *
+ *   Vocoder_DecodePitchIndex 0x00022B78
+ *       q  = Math_SDiv((2*b0 + 1) * 0x2A52, (0x3C << (w - 6)) * 2)
+ *       x  = -(q + 0x44FD)                       log2(f0) in Q12
+ *   FUN_0002AD6C 0x0002AD6C
+ *       f0 = 2^x, evaluated by a Horner polynomial whose coefficients
+ *       0x58B9 0x1EC0 0x71B 0x13B are ln2, (ln2)^2/2, (ln2)^3/6, (ln2)^4/24
+ *       in Q15; the result is Q19 and is clamped to [0x1079, 0x6BCA]
+ *   FUN_0002AD18 0x0002AD18
+ *       L  = 0x3B39C / f0_q19,  and 0x3B39C / 2^19 = 0.462685 - the 0.4627
+ *            constant of the AMBE literature, in the firmware
+ *       plus a Nyquist guard: if (2L+1) * f0_q19 > 0x7FFFF then
+ *            L = (0x80000 / f0_q19 - 1) / 2, i.e. the largest L whose top
+ *            harmonic stays below Nyquist
+ *       then L is clamped to [9, 0x38]
+ *
+ * w is the width of the b0 field, 7 for the DMR 2450 mode.  The 2^x here is
+ * evaluated in floating point rather than by the firmware's polynomial; the law
+ * and every constant are the firmware's.
+ *
+ * Against mbelib's tabulated approximation this reproduces AmbeW0table to
+ * 2.4e-3 relative and AmbeLtable exactly for 119 of 120 indices.  The exception
+ * is b0 = 17, where mbelib's tabulated f0 sits 0.05% above the L = 11/12
+ * boundary and the firmware's law lands just below it, so the firmware yields
+ * 12 where mbelib's table says 11.  The firmware is the shipping implementation
+ * and is taken as correct.
+ */
+#define AMBE_B0_WIDTH 7
+
+static int sdiv(int a, int b)          /* Math_SDiv 0x0002XXXX semantics */
+{
+    int sign = ((a < 0) != (b < 0)) ? -1 : 1;
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    if (a < b) return 0;
+    return sign * (a / b);
+}
+
+void ambe_pitch_from_b0(int b0, int width, float *f0_out, int *L_out)
+{
+    int q, x, f0q19, L;
+    double f0;
+
+    q = sdiv(((2 * b0 + 1) & 0xFFFF) * 0x2A52, (0x3C << (width - 6)) * 2);
+    x = -(q + 0x44FD);
+
+    f0 = pow(2.0, (double)x / 4096.0);
+    f0q19 = (int)(f0 * 524288.0 + 0.5);
+    if (f0q19 < 0x1079) f0q19 = 0x1079;
+    if (f0q19 > 0x6BCA) f0q19 = 0x6BCA;
+
+    L = sdiv(0x3B39C, f0q19) & 0xFFFF;
+    if ((((2 * L + 1) & 0xFFFF) * f0q19) > 0x7FFFF)
+        L = ((sdiv(0x80000, f0q19) * 0x10000 - 0x10000) >> 0x11) & 0xFFFF;
+    if (L >= 0x38) L = 0x38;
+    else if (L < 9) L = 9;
+
+    *f0_out = (float)((double)f0q19 / 524288.0);
+    *L_out = L;
+}
+
 static int bits_to_int(const uint8_t *d, const int *idx, int n)
 {
     int v = 0, i;
@@ -133,9 +199,8 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         for (l = 1; l <= L; l++)
             cur->Vl[l] = 0;
     } else {
-        f0      = ambe_w0_table[b0];
-        cur->w0 = (float)(f0 * 2.0 * M_PI);
-        L       = ambe_l_table[b0];
+        ambe_pitch_from_b0(b0, AMBE_B0_WIDTH, &f0, &L);
+        cur->w0 = (float)((double)f0 * 2.0 * M_PI);
         cur->L  = L;
     }
 

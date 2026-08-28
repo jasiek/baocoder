@@ -7,7 +7,7 @@ stock function and its address.
 
 ```
 make          # libambe.a + the ambe_decode CLI
-make test     # 110 663 checks against known-good vectors
+make test     # 110 428 checks against known-good vectors
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -26,7 +26,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
 | Quantiser codebooks, voicing patterns, block lengths | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
-| Pitch quantiser | `src/ambe_tables_unresolved.c` | still mbelib's — the one table not yet located |
+| Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |
 | DMRA ARC4 voice privacy | `src/rc4.c` | needed only to decode the encrypted test capture |
 
 The public API is `include/ambe.h`. The library has no dependencies beyond
@@ -174,9 +174,9 @@ independent implementations:
 | Test | What is compared | Result |
 |---|---|---|
 | `test_golay` | the Golay code's defining property, exhaustively: 2048 syndromes ↔ 2048 error patterns of weight ≤ 3, all corrected; minimum distance 7; systematic encoding | 30 720 checks |
-| `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; `L = floor(0.4627/f0)` | 3 001 checks, PRBA worst **0.50 LSB**, voicing **32/32** |
+| `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 124 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` 2.4e-3 / `L` 119/120 |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
-| `test_params` | per frame against mbelib: `w0`, `L`, every voicing decision and the classification **exactly**; gain and spectral amplitudes bounded, since the two now use different table precision | 12 808 checks; worst dev γ 2.7e-4, Ml 4.8e-3 |
+| `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 3.9e-4, γ 2.7e-4, Ml 5.0e-3; **0** L divergences |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
 | `test_e2e` | on-air bytes → FEC → ARC4 → audio, against JMBE's `expected.wav` | mean band correlation **0.970**, level-envelope correlation **0.975** |
 
@@ -227,15 +227,15 @@ runs everything else.
   used by P25 Phase 1 are not implemented.
 * Tone frames (`b0` = 126/127) are classified and muted, not synthesised.
 * No soft-decision FEC.
-* The pitch quantiser table is still mbelib's rather than the radio's — see
-  above. Everything else the decoder reads comes out of the image.
+* The synthesis window is this decoder's own (a trapezoid, generated); the
+  firmware synthesises through an inverse FFT and has no equivalent — see above.
 
 ## Licence and provenance
 
 The code here is ISC. It relies on prior open reverse-engineering, and says so:
 
 * **mbelib** — Copyright (C) 2010 mbelib Author, ISC. The correctness oracle
-  throughout, and still the source of the one table not yet located in the image.
+  throughout. No mbelib data ships in this decoder.
 * **known-key-mbe-samples** — the DM-32 capture used as the test corpus.
 * **DSD / dsd-fme** — the DMRA Enhanced Privacy keystream construction was
   cross-checked against `dsd-fme`'s implementation.

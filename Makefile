@@ -11,7 +11,7 @@ CPPFLAGS += -Iinclude -Isrc
 LDLIBS  += -lm
 
 SRC     := src/golay.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
-           src/ambe_tables_fw.c src/ambe_tables_unresolved.c src/ambe_decoder.c src/rc4.c
+           src/ambe_tables_fw.c src/ambe_decoder.c src/rc4.c
 OBJ     := $(SRC:.c=.o)
 LIB     := libambe.a
 

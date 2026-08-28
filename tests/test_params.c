@@ -8,8 +8,11 @@
  * matching w0, L, gamma, the voicing decisions and all 56 spectral amplitudes
  * at every step is a much stronger statement than any single-frame vector.
  *
- * w0, L, the voicing decisions and the frame classification must match mbelib
- * exactly - none of them depend on the quantiser tables.  The gain and the
+ * The voicing decisions and the frame classification must match mbelib exactly.
+ * w0 is bounded rather than exact because it now comes from the firmware's own
+ * closed-form pitch law instead of mbelib's tabulation of the same quantiser;
+ * L stays exact apart from the single documented index where the law and the
+ * table disagree.  The gain and the
  * spectral amplitudes cannot: this decoder uses the firmware's Q11 tables and
  * mbelib uses its own float reconstruction of the same quantisers, so they
  * differ by the firmware's quantisation step.  Those are bounded instead, at
@@ -21,7 +24,8 @@
 
 #define TOL 1e-4
 
-static double worst_gamma, worst_ml, worst_log2ml;
+static double worst_gamma, worst_ml, worst_log2ml, worst_w0;
+static int l_mismatch;
 
 static int close_enough(double a, double b, double tol)
 {
@@ -80,9 +84,21 @@ int main(void)
               "frame %d: classification %d vs mbelib bad=%d\n", n, (int)type, bad);
 
         if (bad == 0) {
-            CHECK(close_enough(cur.w0, w0, TOL), "frame %d: w0 %.9g vs %.9g\n",
+            /*
+             * w0 comes from the firmware's closed-form pitch law now, not from
+             * mbelib's tabulation of the same quantiser, so it is bounded at
+             * the law-vs-table divergence measured in test_tables rather than
+             * required to be equal.  L is still exact: the one index where the
+             * two disagree (b0 = 17) is asserted there.
+             */
+            dev(cur.w0, w0, &worst_w0);
+            CHECK(close_enough(cur.w0, w0, 3e-3), "frame %d: w0 %.9g vs %.9g\n",
                   n, cur.w0, w0);
-            CHECK(cur.L == L, "frame %d: L %d vs %d\n", n, cur.L, L);
+            if (cur.L != L) {
+                l_mismatch++;
+                CHECK(info.b[0] == 17, "frame %d: L %d vs %d at b0=%d\n",
+                      n, cur.L, L, info.b[0]);
+            }
             dev(cur.gamma, gamma, &worst_gamma);
             for (i = 1; i <= L; i++) {
                 v = strtod(p, &p);
@@ -124,8 +140,10 @@ int main(void)
     CHECK(worst_gamma < 5e-4, "gamma deviation %.3e exceeds a Q11 step\n", worst_gamma);
     CHECK(worst_ml < 1e-2, "Ml deviation %.3e too large for Q11 tables\n", worst_ml);
     CHECK(worst_log2ml < 1e-2, "log2Ml deviation %.3e too large\n", worst_log2ml);
-    printf("[worst dev vs mbelib: gamma %.1e Ml %.1e log2Ml %.1e; %d voice, %d silence] ",
-           worst_gamma, worst_ml, worst_log2ml, voiced, silence);
+    printf("[worst dev vs mbelib: w0 %.1e gamma %.1e Ml %.1e log2Ml %.1e; "
+           "%d L divergences; %d voice, %d silence] ",
+           worst_w0, worst_gamma, worst_ml, worst_log2ml, l_mismatch,
+           voiced, silence);
 
     return t_done("ambe+2 parameter decode vs mbelib");
 }

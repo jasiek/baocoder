@@ -10,6 +10,8 @@
  * and mbelib's reconstruction against a shipping DVSI implementation.
  *
  * The block-length table is required to match exactly, since it is integers.
+ * The pitch and harmonic count are not tables at all - the firmware computes
+ * them - so its law is checked against mbelib's tabulation instead.
  */
 #include "ambe.h"
 #include "ambe_tables.h"
@@ -134,14 +136,49 @@ int main(void)
     }
 
     /*
-     * The harmonic count is not an independent table: it falls out of the
-     * fundamental.  Checking that here is what lets ambe_l_table be treated as
-     * derived rather than as a fourth unresolved table.
+     * The pitch and harmonic count are not tables at all: the firmware computes
+     * them, and ambe_pitch_from_b0 evaluates its law with its constants.  This
+     * checks that law against mbelib's tabulated approximation of the same
+     * quantiser.
+     *
+     * b0 = 17 is a genuine one-index divergence, not slop: mbelib's tabulated
+     * f0 sits just above the L = 11/12 boundary and the firmware's law lands
+     * just below it, so the firmware yields 12 where mbelib's table says 11.
+     * The firmware is the shipping implementation; the exception is asserted
+     * explicitly so it cannot silently become two.
      */
-    for (i = 0; i < 120; i++)
-        CHECK((int)floor(0.4627 / ambe_w0_table[i]) == (int)ambe_l_table[i],
-              "L[%d]: floor(0.4627/f0) = %d, table says %d\n",
-              i, (int)floor(0.4627 / ambe_w0_table[i]), (int)ambe_l_table[i]);
+    {
+        int rn2 = 0, mism = 0;
+        double *w0ref = load_ref("w0", &rn);
+        double *lref  = load_ref("ltab", &rn2);
+        double worst = 0.0;
+        CHECK(w0ref && lref && rn == 120 && rn2 == 120,
+              "pitch reference missing or wrong size\n");
+        if (w0ref && lref) {
+            for (i = 0; i < 120; i++) {
+                float f0;
+                int Lv;
+                double d;
+                ambe_pitch_from_b0(i, 7, &f0, &Lv);
+                d = fabs((double)f0 - w0ref[i]) / w0ref[i];
+                if (d > worst) worst = d;
+                CHECK(d < 3e-3, "f0[%d]: firmware law %.6f vs mbelib %.6f (%.2e)\n",
+                      i, (double)f0, w0ref[i], d);
+                if (Lv != (int)lref[i]) {
+                    mism++;
+                    CHECK(i == 17, "L[%d]: firmware law %d vs mbelib %d\n",
+                          i, Lv, (int)lref[i]);
+                }
+                CHECK(Lv >= 9 && Lv <= 56, "L[%d] = %d out of range\n", i, Lv);
+            }
+            CHECK(mism == 1, "expected exactly 1 L divergence from mbelib, got %d\n",
+                  mism);
+            printf("\n    pitch law 120 indices, f0 worst %.2e rel, L %d/120 vs mbelib",
+                   worst, 120 - mism);
+            free(w0ref);
+            free(lref);
+        }
+    }
 
     printf("\n                         ");
     return t_done("firmware quantiser tables vs mbelib");

@@ -108,6 +108,13 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
                                   ambe_parms *cur, ambe_parms *prev,
                                   ambe_frame_info *info);
 
+/*
+ * Fundamental frequency (cycles/sample) and harmonic count for a b0 index,
+ * computed by the firmware's own closed-form law rather than a table.
+ * `width` is the width of the b0 field: 7 for the DMR 2450 mode.
+ */
+void ambe_pitch_from_b0(int b0, int width, float *f0, int *L);
+
 void ambe_init_parms(ambe_parms *cur, ambe_parms *prev, ambe_parms *prev_enh);
 void ambe_move_parms(const ambe_parms *src, ambe_parms *dst);
 

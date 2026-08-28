@@ -7,10 +7,9 @@
  *                             image by tools/extract_tables.py.  Signed 16-bit
  *                             Q11 - divide by AMBE_Q11 for the real value.
  *
- *   ambe_tables_unresolved.c  the four tables not yet located in the image,
- *                             still carrying mbelib's values.  See
- *                             tools/gen_unresolved_tables.py for what was
- *                             searched and what the remaining leads are.
+ * There is no longer a second file: every table the decoder reads comes out of
+ * the firmware image, and the pitch/harmonic-count pair is computed by the
+ * firmware's own closed-form law (see ambe_pitch_from_b0 in ambe_params.c).
  */
 #ifndef AMBE_TABLES_H
 #define AMBE_TABLES_H
@@ -28,9 +27,5 @@ extern const short ambe_hoc_b8_q11[32];     /* [8][4]   SRAM 0x18003290 */
 extern const short ambe_dg_q11[32];         /* gain     SRAM 0x180038B4 */
 extern const short ambe_lmprbl[228];        /* [57][4]  SRAM 0x18002030, unpacked */
 extern const unsigned int ambe_vuv_packed[128]; /* voicing SRAM 0x18003628 */
-
-/* --- not yet located in the image -------------------------------------- */
-extern const float ambe_w0_table[120];      /* fundamental, cycles/sample */
-extern const short ambe_l_table[120];       /* harmonic count per b0, = floor(0.4627/f0) */
 
 #endif
