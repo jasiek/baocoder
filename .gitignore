@@ -1,0 +1,12 @@
+third_party/
+*.o
+*.a
+ambe_decode
+tools/mbe_ref
+tests/test_golay
+tests/test_tables
+tests/test_fec
+tests/test_params
+tests/test_synth
+tests/test_e2e
+*.dSYM/
