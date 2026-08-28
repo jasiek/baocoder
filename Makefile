@@ -8,7 +8,10 @@
 
 CC      ?= cc
 CFLAGS  ?= -O2 -g -std=c99 -Wall -Wextra -Wno-unused-parameter
-CPPFLAGS += -Iinclude -Isrc
+# glibc hides POSIX 2008 (getline, used by the tests) and the BSD math
+# constants when -std=c99 is in force; _DEFAULT_SOURCE asks for the usual set
+# back.  macOS exposes both regardless and ignores it.
+CPPFLAGS += -Iinclude -Isrc -D_DEFAULT_SOURCE
 LDLIBS  += -lm
 
 SRC     := src/golay.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \

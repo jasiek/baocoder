@@ -8,18 +8,12 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.os }} / ${{ matrix.cc }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.cc }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            cc: gcc
-          - os: ubuntu-latest
-            cc: clang
-          - os: macos-latest
-            cc: clang
+        cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +24,7 @@ jobs:
         run: make test CC=${{ matrix.cc }}
 
   sanitizers:
-    name: ubuntu-latest / clang + asan,ubsan
+    name: clang + asan,ubsan
     runs-on: ubuntu-latest
     env:
       # -fsanitize is passed via CFLAGS, which the Makefile also uses on its

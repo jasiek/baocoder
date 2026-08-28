@@ -9,6 +9,11 @@
 #include <errno.h>
 #include <stdint.h>
 
+/* glibc hides M_PI under -std=c99; the library sources guard it the same way. */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 static int t_fail;
 static int t_checks;
 
