@@ -20,3 +20,4 @@ tools/dmra_decrypt
 tests/test_basop
 .compare/
 tests/test_fft
+tests/test_encode_voicing
