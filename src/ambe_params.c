@@ -1,5 +1,5 @@
 /*
- * ambe_params.c - 49 payload bits -> MBE speech model parameters.
+ * ambe_params.c - 49 payload bits -> MBE speech model parameters, in fixed point.
  *
  * The AMBE+2 2450 payload carries nine quantiser indices b0..b8, scattered
  * across the 49 bits so that the Golay-protected prefix holds the perceptually
@@ -7,12 +7,13 @@
  * voicing pattern, b2 the frame gain, b3/b4 the PRBA gain vectors and b5..b8
  * the higher-order spectral coefficients.
  *
- * Firmware provenance (Ghidra program DM32UV_L01_048.bin) - this stage is a
- * behavioural reimplementation rather than a transcription, because the stock
- * code is dense fixed-point DSP; the functions that correspond to each step:
+ * Firmware provenance (Ghidra program DM32UV_L01_048.bin):
  *
- *   Vocoder_DecodeFrameParameters      0x0001994C  top-level parameter decode
- *   Vocoder_DecodeSpectralCodebookEntry 0x00022DB4 codebook fetch (PRBA/HOC)
+ *   Vocoder_DecodeFrameParameters       0x0001994C  top-level parameter decode
+ *   Vocoder_DecodePitchIndex            0x00022B78  b0 -> log2(f0) in Q12
+ *   Vocoder_PitchFromLog2               0x0002AD6C  2^x -> f0 in Q19
+ *   Vocoder_HarmonicCountFromPitch      0x0002AD18  f0 -> L
+ *   Vocoder_DecodeSpectralCodebookEntry 0x00022DB4  codebook fetch (PRBA/HOC)
  *   Vocoder_BlendSpectralCodebookEntries 0x0002343C
  *   Vocoder_ExpandSpectralCodebookEntry 0x0002AFAC
  *   Vocoder_ComputeHarmonicResampleRatio 0x000269B0 eq. 40/41 (prevL/curL)
@@ -29,53 +30,61 @@
  * higher-order coefficients combined through an inverse DCT, which is what is
  * implemented here.
  *
+ * Arithmetic: everything is integer.  The transcendentals come from
+ * src/ambe_basop.c, which is the radio's own Log2/Pow2/Sqrt/cos with the
+ * radio's coefficients, so this stage inherits their accuracy rather than
+ * libm's - see tests/test_basop.c for the measured figures.
+ *
  * SPDX-License-Identifier: ISC
  */
-#include <math.h>
 #include <string.h>
 #include "ambe.h"
+#include "ambe_basop.h"
 #include "ambe_tables.h"
 #include "ambe_bitpos.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-/*
- * Fundamental frequency and harmonic count from b0.
- *
- * The firmware does not tabulate either.  It evaluates a closed-form law, and
- * these are its constants, read out of the image:
- *
- *   Vocoder_DecodePitchIndex 0x00022B78
- *       q  = Math_SDiv((2*b0 + 1) * 0x2A52, (0x3C << (w - 6)) * 2)
- *       x  = -(q + 0x44FD)                       log2(f0) in Q12
- *   FUN_0002AD6C 0x0002AD6C
- *       f0 = 2^x, evaluated by a Horner polynomial whose coefficients
- *       0x58B9 0x1EC0 0x71B 0x13B are ln2, (ln2)^2/2, (ln2)^3/6, (ln2)^4/24
- *       in Q15; the result is Q19 and is clamped to [0x1079, 0x6BCA]
- *   FUN_0002AD18 0x0002AD18
- *       L  = 0x3B39C / f0_q19,  and 0x3B39C / 2^19 = 0.462685 - the 0.4627
- *            constant of the AMBE literature, in the firmware
- *       plus a Nyquist guard: if (2L+1) * f0_q19 > 0x7FFFF then
- *            L = (0x80000 / f0_q19 - 1) / 2, i.e. the largest L whose top
- *            harmonic stays below Nyquist
- *       then L is clamped to [9, 0x38]
- *
- * w is the width of the b0 field, 7 for the DMR 2450 mode.  The 2^x here is
- * evaluated in floating point rather than by the firmware's polynomial; the law
- * and every constant are the firmware's.
- *
- * Against mbelib's tabulated approximation this reproduces AmbeW0table to
- * 2.4e-3 relative and AmbeLtable exactly for 119 of 120 indices.  The exception
- * is b0 = 17, where mbelib's tabulated f0 sits 0.05% above the L = 11/12
- * boundary and the firmware's law lands just below it, so the firmware yields
- * 12 where mbelib's table says 11.  The firmware is the shipping implementation
- * and is taken as correct.
- */
 #define AMBE_B0_WIDTH 7
 
-static int sdiv(int a, int b)          /* Math_SDiv 0x0002XXXX semantics */
+/* Constants, in the Q30 the code multiplies them at. */
+#define K_065_Q30      697932186   /* 0.65,          eq. 43 prediction weight */
+#define K_RCONST_Q30   379625062   /* 1/(2*sqrt(2)), the Ri -> Cik rotation   */
+#define K_0P2046_Q30   219687577   /* 0.2046,        unvoiced amplitude scale */
+#define K_TWO_PI_Q28  1686629713   /* 2*pi, for w0 = 2*pi*f0                  */
+
+/*
+ * exp(0.693*x) is what mbelib and this codec's float version compute where
+ * 2^x is meant: 0.693 is a truncated ln2, so the result is 2^(0.9997877*x),
+ * not 2^x.  The difference reaches 0.17% at the top of the observed log2Ml
+ * range, which is larger than most of the error budget here, so it is
+ * reproduced exactly rather than quietly corrected - otherwise this
+ * implementation and the float one would not be computing the same function,
+ * and no comparison between them would mean anything.
+ */
+#define K_0P693_OVER_LN2_Q30 1073513829
+
+/*
+ * 0.5*log2(L) for L = 0..56, Q24.
+ *
+ * A table rather than a call to the radio's Math_Log2, deliberately: L takes
+ * 48 distinct values, so this is exact, while Math_Log2 is a four-term Taylor
+ * series whose worst-case error is 2.6e-3 (tests/test_basop.c), and this term
+ * lands directly on every spectral amplitude in the frame.
+ */
+static const int32_t half_log2_L_q24[57] = {
+            0,         0,   8388608,  13295629,  16777216,  19477745,
+     21684237,  23549800,  25165824,  26591258,  27866353,  29019816,
+     30072845,  31041538,  31938408,  32773374,  33554432,  34288123,
+     34979866,  35634199,  36254961,  36845429,  37408424,  37946388,
+     38461453,  38955489,  39430146,  39886887,  40327016,  40751698,
+     41161982,  41558811,  41943040,  42315445,  42676731,  43027545,
+     43368474,  43700062,  44022807,  44337167,  44643569,  44942404,
+     45234037,  45518808,  45797032,  46069003,  46334996,  46595268,
+     46850061,  47099600,  47344097,  47583753,  47818754,  48049279,
+     48275495,  48497560,  48715624
+};
+
+/* Math_SDiv 0x00018D74 semantics, on ints. */
+static int sdiv(int a, int b)
 {
     int sign = ((a < 0) != (b < 0)) ? -1 : 1;
     if (a < 0) a = -a;
@@ -84,27 +93,85 @@ static int sdiv(int a, int b)          /* Math_SDiv 0x0002XXXX semantics */
     return sign * (a / b);
 }
 
-void ambe_pitch_from_b0(int b0, int width, float *f0_out, int *L_out)
+/*
+ * Vocoder_PitchFromLog2 0x0002AD6C: 2^x for the pitch path, transcribed from
+ * the disassembly at 0x0002AD98-0x0002ADCC.  `x` is log2(f0) in Q12.
+ *
+ * It range-reduces by adding 0x1000 until the argument is above -0x1000,
+ * counting from -4, then evaluates 2^frac by a Horner polynomial with
+ * coefficients 0x58B9 0x1EC0 0x71B 0x13B - ln2, (ln2)^2/2, (ln2)^3/6 and
+ * (ln2)^4/24 in Q15, the Taylor series of 2^x.  `zext r2,r2,0x1b,0xc` takes
+ * bits [27:12], the XOR with 0x8000 supplies the implicit leading bit, and
+ * the arithmetic shift by the accumulated exponent puts the result in Q19.
+ *
+ * Using the radio's polynomial rather than a library pow() is not a rounding
+ * detail: at b0 = 17 the two land on opposite sides of an L boundary.  See
+ * tests/test_tables.c.
+ */
+static int32_t pitch_from_log2_q12(int16_t x)
 {
-    int q, x, f0q19, L;
-    double f0;
+    int32_t iv = (int16_t)x, t;
+    int16_t k;
+    uint32_t f;
 
+    if (iv < -0x1000) {
+        k = -4;
+        do {
+            x  = (int16_t)(uint16_t)(x + 0x1000);
+            iv = (int16_t)x;
+            k  = (int16_t)(uint16_t)(k + 1);
+        } while (iv < -0x1000);
+    } else {
+        k = -4;
+    }
+
+    t = ((iv * 0x13b) >> 12) + 0x71b;
+    t = (int16_t)(((t * iv) >> 12) + 0x1ec0);
+    t = (int16_t)(((t * iv) >> 12) + 0x58b9);
+
+    f = (uint32_t)(t * iv);
+    f = (f >> 12) & 0xffff;
+    f ^= 0x8000;
+    return (int32_t)((int16_t)f) >> (k & 0x1f);
+}
+
+/*
+ * Vocoder_HarmonicCountFromPitch 0x0002AD18.  0x3B39C / 2^19 = 0.462685 is the
+ * 0.4627 constant of the AMBE literature sitting in the firmware as an
+ * integer; the guard below it is the Nyquist limit on the top harmonic.
+ */
+static int harmonic_count(int32_t f0_q19)
+{
+    int L = sdiv(0x3B39C, f0_q19) & 0xFFFF;
+
+    if ((((2 * L + 1) & 0xFFFF) * f0_q19) > 0x7FFFF)
+        L = ((sdiv(0x80000, f0_q19) * 0x10000 - 0x10000) >> 0x11) & 0xFFFF;
+    if (L >= 0x38) L = 0x38;
+    else if (L < 9) L = 9;
+    return L;
+}
+
+void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L_out)
+{
+    int q, x;
+    int32_t f0;
+
+    /* Vocoder_DecodePitchIndex 0x00022B78 */
     q = sdiv(((2 * b0 + 1) & 0xFFFF) * 0x2A52, (0x3C << (width - 6)) * 2);
     x = -(q + 0x44FD);
 
-    f0 = pow(2.0, (double)x / 4096.0);
-    f0q19 = (int)(f0 * 524288.0 + 0.5);
-    if (f0q19 < 0x1079) f0q19 = 0x1079;
-    if (f0q19 > 0x6BCA) f0q19 = 0x6BCA;
+    f0 = pitch_from_log2_q12((int16_t)x);
+    if (f0 < 0x1079) f0 = 0x1079;
+    if (f0 > 0x6BCA) f0 = 0x6BCA;
 
-    L = sdiv(0x3B39C, f0q19) & 0xFFFF;
-    if ((((2 * L + 1) & 0xFFFF) * f0q19) > 0x7FFFF)
-        L = ((sdiv(0x80000, f0q19) * 0x10000 - 0x10000) >> 0x11) & 0xFFFF;
-    if (L >= 0x38) L = 0x38;
-    else if (L < 9) L = 9;
+    *f0_q19 = f0;
+    *L_out  = harmonic_count(f0);
+}
 
-    *f0_out = (float)((double)f0q19 / 524288.0);
-    *L_out = L;
+int32_t ambe_w0_q24(const ambe_parms *p)
+{
+    /* 2*pi*f0: Q19 x Q28 -> Q24 */
+    return (int32_t)(((int64_t)p->f0 * K_TWO_PI_Q28) >> 23);
 }
 
 static int bits_to_int(const uint8_t *d, const int *idx, int n)
@@ -138,9 +205,10 @@ const int ambe_b8_idx[3] = { 34, 47, 48 };
 void ambe_move_parms(const ambe_parms *src, ambe_parms *dst)
 {
     int l;
-    dst->w0     = src->w0;
+    dst->f0     = src->f0;
     dst->L      = src->L;
     dst->gamma  = src->gamma;
+    dst->Ml_exp = src->Ml_exp;
     dst->repeat = src->repeat;
     for (l = 0; l <= AMBE_MAX_HARMONICS; l++) {
         dst->Ml[l]     = src->Ml[l];
@@ -155,15 +223,17 @@ void ambe_init_parms(ambe_parms *cur, ambe_parms *prev, ambe_parms *prev_enh)
 {
     int l;
     memset(prev, 0, sizeof(*prev));
-    prev->w0    = 0.09378f;
-    prev->L     = 30;
-    prev->gamma = 0.0f;
+    prev->f0     = 7825;      /* 0.09378 rad/sample, the float version's seed,
+                                 as 0.0149253 turns per sample in Q19 */
+    prev->L      = 30;
+    prev->gamma  = 0;
+    prev->Ml_exp = 0;
     for (l = 0; l <= AMBE_MAX_HARMONICS; l++) {
-        prev->Ml[l]     = 0.0f;
+        prev->Ml[l]     = 0;
         prev->Vl[l]     = 0;
-        prev->log2Ml[l] = 0.0f;
-        prev->PHIl[l]   = 0.0f;
-        prev->PSIl[l]   = (float)(M_PI / 2.0);
+        prev->log2Ml[l] = 0;
+        prev->PHIl[l]   = 0;
+        prev->PSIl[l]   = 0x40000000u;   /* pi/2 is a quarter turn, Q32 */
     }
     prev->repeat = 0;
     ambe_move_parms(prev, cur);
@@ -178,11 +248,11 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     int b0, b1, b2, b3, b4, b5, b6, b7, b8;
     int i, j, k, l, L, silence = 0;
     int Ji[5], intkl[AMBE_MAX_HARMONICS + 1], nextkl[AMBE_MAX_HARMONICS + 1];
-    float f0, unvc;
-    float Gm[9], Ri[9], Cik[5][18], Tl[AMBE_MAX_HARMONICS + 1];
-    float flokl[AMBE_MAX_HARMONICS + 1], deltal[AMBE_MAX_HARMONICS + 1];
-    float sum, Sum42, Sum43, BigGamma, deltaGamma, c1, c2;
-    const float rconst = (float)(1.0 / (2.0 * 1.4142135623730951));
+    int32_t f0, unvc_q30;
+    int32_t Gm[9], Ri[9], Cik[5][18], Tl[AMBE_MAX_HARMONICS + 1];
+    int32_t deltal[AMBE_MAX_HARMONICS + 1];
+    int32_t Sum42, Sum43, BigGamma, dgamma;
+    int64_t acc;
 
     cur->repeat = prev->repeat;
 
@@ -201,20 +271,28 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         return AMBE_FRAME_TONE;
     }
     if (b0 == 124 || b0 == 125) {
-        silence  = 1;
-        cur->w0  = (float)(2.0 * M_PI / 32.0);
-        f0       = 1.0f / 32.0f;
-        L        = 14;
-        cur->L   = 14;
+        silence = 1;
+        f0      = 1 << (AMBE_Q_F0 - 5);    /* 1/32 turn per sample, exactly */
+        L       = 14;
+        cur->f0 = f0;
+        cur->L  = 14;
         for (l = 1; l <= L; l++)
             cur->Vl[l] = 0;
     } else {
         ambe_pitch_from_b0(b0, AMBE_B0_WIDTH, &f0, &L);
-        cur->w0 = (float)((double)f0 * 2.0 * M_PI);
+        cur->f0 = f0;
         cur->L  = L;
     }
 
-    unvc = (float)(0.2046 / sqrt((double)cur->w0));
+    /* unvc = 0.2046 / sqrt(w0), the unvoiced amplitude scale */
+    {
+        int32_t w0_q28 = (int32_t)(((int64_t)f0 * K_TWO_PI_Q28) >> AMBE_Q_F0);
+        short   e = 31 - 28;               /* w0 = w0_q28 * 2^(e - 31) */
+        unsigned int m = ambe_sqrt(w0_q28, &e);
+        /* sqrt(w0) = m * 2^(e - 15); unvc = 0.2046 / that, in Q30 */
+        int64_t den = (int64_t)m << (e - 15 + 30);
+        unvc_q30 = den ? (int32_t)(((int64_t)K_0P2046_Q30 << 30) / den) : 0;
+    }
 
     /* ---- b1: voicing decisions, one per 500 Hz band, mapped per harmonic */
     b1 = bits_to_int(ambe_d, B1_IDX, 5);
@@ -228,48 +306,49 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
          */
         unsigned int vuv = ambe_vuv_packed[(b1 << 2) & 127];
         for (l = 1; l <= L; l++) {
-            int jl = (int)((float)l * 16.0f * f0);
+            int jl = (int)(((int64_t)l * 16 * f0) >> AMBE_Q_F0);
             if (jl > 7) jl = 7;
             cur->Vl[l] = (uint8_t)((vuv >> (30 - 2 * jl)) & 1u);
         }
     }
 
-    /* ---- b2: differential frame gain */
+    /* ---- b2: differential frame gain.  Q11 -> Q24 is exact. */
     b2         = bits_to_int(ambe_d, B2_IDX, 5);
-    deltaGamma = ambe_dg_q11[b2] / AMBE_Q11;
-    cur->gamma = deltaGamma + 0.5f * prev->gamma;
+    dgamma     = (int32_t)ambe_dg_q11[b2] << (AMBE_Q_LOG - 11);
+    cur->gamma = dgamma + ((prev->gamma + 1) >> 1);
 
     /* ---- b3/b4: PRBA vectors -> Ri via an 8-point inverse cosine transform */
     b3 = bits_to_int(ambe_d, B3_IDX, 9);
     b4 = bits_to_int(ambe_d, B4_IDX, 7);
-    Gm[1] = 0.0f;
-    Gm[2] = ambe_prba24_q11[b3 * 3 + 0] / AMBE_Q11;
-    Gm[3] = ambe_prba24_q11[b3 * 3 + 1] / AMBE_Q11;
-    Gm[4] = ambe_prba24_q11[b3 * 3 + 2] / AMBE_Q11;
-    Gm[5] = ambe_prba58_q11[b4 * 4 + 0] / AMBE_Q11;
-    Gm[6] = ambe_prba58_q11[b4 * 4 + 1] / AMBE_Q11;
-    Gm[7] = ambe_prba58_q11[b4 * 4 + 2] / AMBE_Q11;
-    Gm[8] = ambe_prba58_q11[b4 * 4 + 3] / AMBE_Q11;
+    Gm[1] = 0;
+    Gm[2] = (int32_t)ambe_prba24_q11[b3 * 3 + 0] << (AMBE_Q_LOG - 11);
+    Gm[3] = (int32_t)ambe_prba24_q11[b3 * 3 + 1] << (AMBE_Q_LOG - 11);
+    Gm[4] = (int32_t)ambe_prba24_q11[b3 * 3 + 2] << (AMBE_Q_LOG - 11);
+    Gm[5] = (int32_t)ambe_prba58_q11[b4 * 4 + 0] << (AMBE_Q_LOG - 11);
+    Gm[6] = (int32_t)ambe_prba58_q11[b4 * 4 + 1] << (AMBE_Q_LOG - 11);
+    Gm[7] = (int32_t)ambe_prba58_q11[b4 * 4 + 2] << (AMBE_Q_LOG - 11);
+    Gm[8] = (int32_t)ambe_prba58_q11[b4 * 4 + 3] << (AMBE_Q_LOG - 11);
 
+    /*
+     * cos(pi*(k-1)*(i-0.5)/8) is cos of (k-1)*(2i-1)/32 turns, and a turn is
+     * 32768 in the phase units ambe_cos_q15 takes, so the phase is the exact
+     * integer (k-1)*(2i-1)*1024 - no rounding before the table lookup.
+     */
     for (i = 1; i <= 8; i++) {
-        sum = 0.0f;
+        acc = 0;
         for (k = 1; k <= 8; k++) {
-            float am = (k == 1) ? 1.0f : 2.0f;
-            sum += am * Gm[k] *
-                   (float)cos((M_PI * (double)(k - 1) * ((double)i - 0.5)) / 8.0);
+            int32_t am = (k == 1) ? 1 : 2;
+            acc += (int64_t)am * Gm[k] * ambe_cos_q15((k - 1) * (2 * i - 1) * 1024);
         }
-        Ri[i] = sum;
+        Ri[i] = (int32_t)((acc + (1 << 14)) >> 15);
     }
 
     memset(Cik, 0, sizeof(Cik));
-    Cik[1][1] = 0.5f * (Ri[1] + Ri[2]);
-    Cik[1][2] = rconst * (Ri[1] - Ri[2]);
-    Cik[2][1] = 0.5f * (Ri[3] + Ri[4]);
-    Cik[2][2] = rconst * (Ri[3] - Ri[4]);
-    Cik[3][1] = 0.5f * (Ri[5] + Ri[6]);
-    Cik[3][2] = rconst * (Ri[5] - Ri[6]);
-    Cik[4][1] = 0.5f * (Ri[7] + Ri[8]);
-    Cik[4][2] = rconst * (Ri[7] - Ri[8]);
+    for (i = 1; i <= 4; i++) {
+        int32_t a = Ri[2 * i - 1], b = Ri[2 * i];
+        Cik[i][1] = (a + b + 1) >> 1;
+        Cik[i][2] = (int32_t)(((int64_t)(a - b) * K_RCONST_Q30 + (1 << 29)) >> 30);
+    }
 
     /* ---- b5..b8: higher-order coefficients, block lengths from L */
     b5 = bits_to_int(ambe_d, B5_IDX, 5);
@@ -283,31 +362,39 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     Ji[4] = ambe_lmprbl[L * 4 + 3];
 
     for (k = 3; k <= Ji[1]; k++)
-        Cik[1][k] = (k > 6) ? 0.0f : ambe_hoc_b5_q11[b5 * 4 + (k - 3)] / AMBE_Q11;
+        Cik[1][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b5_q11[b5 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
     for (k = 3; k <= Ji[2]; k++)
-        Cik[2][k] = (k > 6) ? 0.0f : ambe_hoc_b6_q11[b6 * 4 + (k - 3)] / AMBE_Q11;
+        Cik[2][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b6_q11[b6 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
     for (k = 3; k <= Ji[3]; k++)
-        Cik[3][k] = (k > 6) ? 0.0f : ambe_hoc_b7_q11[b7 * 4 + (k - 3)] / AMBE_Q11;
+        Cik[3][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b7_q11[b7 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
     for (k = 3; k <= Ji[4]; k++)
-        Cik[4][k] = (k > 6) ? 0.0f : ambe_hoc_b8_q11[b8 * 4 + (k - 3)] / AMBE_Q11;
+        Cik[4][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b8_q11[b8 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
 
     if (info) {
         info->b[1] = b1; info->b[2] = b2; info->b[3] = b3; info->b[4] = b4;
         info->b[5] = b5; info->b[6] = b6; info->b[7] = b7; info->b[8] = b8;
     }
 
-    /* ---- inverse DCT of each block gives the prediction residual Tl */
+    /*
+     * Inverse DCT of each block gives the prediction residual Tl.  Here the
+     * cosine argument is (k-1)*(2j-1)/(4*ji) turns, which is not an exact
+     * multiple of a phase unit, so the phase is rounded to nearest - the only
+     * rounding in the transform besides the table's own.
+     */
     l = 1;
     for (i = 1; i <= 4; i++) {
         int ji = Ji[i];
         for (j = 1; j <= ji; j++) {
-            sum = 0.0f;
+            acc = 0;
             for (k = 1; k <= ji; k++) {
-                float ak = (k == 1) ? 1.0f : 2.0f;
-                sum += ak * Cik[i][k] *
-                       (float)cos((M_PI * (double)(k - 1) * ((double)j - 0.5)) / (double)ji);
+                int32_t ak = (k == 1) ? 1 : 2;
+                int phase;
+                if (Cik[i][k] == 0)
+                    continue;
+                phase = (int)(((int64_t)(k - 1) * (2 * j - 1) * 16384 + ji) / (2 * ji));
+                acc += (int64_t)ak * Cik[i][k] * ambe_cos_q15(phase);
             }
-            Tl[l++] = sum;
+            Tl[l++] = (int32_t)((acc + (1 << 14)) >> 15);
         }
     }
 
@@ -325,35 +412,64 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     prev->log2Ml[0] = prev->log2Ml[1];
     prev->Ml[0]     = prev->Ml[1];
 
-    Sum43 = 0.0f;
+    acc = 0;
     for (l = 1; l <= cur->L; l++) {
-        flokl[l]  = ((float)prev->L / (float)cur->L) * (float)l;
-        intkl[l]  = (int)flokl[l];
-        deltal[l] = flokl[l] - (float)intkl[l];
+        /* flokl = (prevL/curL)*l, carried as Q16 */
+        int32_t flokl = (int32_t)((((int64_t)prev->L * l) << 16) / cur->L);
+        intkl[l]  = flokl >> 16;
+        deltal[l] = flokl & 0xFFFF;
         /* intkl reaches AMBE_MAX_HARMONICS only when prev->L == cur->L == 56,
            and there deltal is exactly zero, so holding the index leaves the
            sum unchanged and keeps the upper tap inside the array. */
         nextkl[l] = intkl[l] < AMBE_MAX_HARMONICS ? intkl[l] + 1 : intkl[l];
-        Sum43 += (1.0f - deltal[l]) * prev->log2Ml[intkl[l]] +
-                 deltal[l] * prev->log2Ml[nextkl[l]];
+        acc += ((int64_t)(65536 - deltal[l]) * prev->log2Ml[intkl[l]] +
+                (int64_t)deltal[l] * prev->log2Ml[nextkl[l]]) >> 16;
     }
-    Sum43 = (0.65f / (float)cur->L) * Sum43;
+    Sum43 = (int32_t)(((acc * K_065_Q30) / cur->L) >> 30);
 
-    Sum42 = 0.0f;
+    acc = 0;
     for (l = 1; l <= cur->L; l++)
-        Sum42 += Tl[l];
-    Sum42 /= (float)cur->L;
+        acc += Tl[l];
+    Sum42 = (int32_t)(acc / cur->L);
 
-    BigGamma = cur->gamma - 0.5f * (float)(log((double)cur->L) / log(2.0)) - Sum42;
+    BigGamma = cur->gamma - half_log2_L_q24[cur->L] - Sum42;
 
-    for (l = 1; l <= cur->L; l++) {
-        c1 = 0.65f * (1.0f - deltal[l]) * prev->log2Ml[intkl[l]];
-        c2 = 0.65f * deltal[l] * prev->log2Ml[nextkl[l]];
-        cur->log2Ml[l] = Tl[l] + c1 + c2 - Sum43 + BigGamma;
-        if (cur->Vl[l])
-            cur->Ml[l] = (float)exp(0.693 * (double)cur->log2Ml[l]);
-        else
-            cur->Ml[l] = unvc * (float)exp(0.693 * (double)cur->log2Ml[l]);
+    /* ---- amplitudes.  Block floating point: one exponent for the frame. */
+    {
+        int32_t mant[AMBE_MAX_HARMONICS + 1];
+        short   ex[AMBE_MAX_HARMONICS + 1];
+        int     maxex = -32768;
+
+        for (l = 1; l <= cur->L; l++) {
+            int64_t c = ((int64_t)(65536 - deltal[l]) * prev->log2Ml[intkl[l]] +
+                         (int64_t)deltal[l] * prev->log2Ml[nextkl[l]]) >> 16;
+            int64_t x;
+            c = (c * K_065_Q30) >> 30;
+            cur->log2Ml[l] = Tl[l] + (int32_t)c - Sum43 + BigGamma;
+
+            /* Ml = exp(0.693 * log2Ml): see K_0P693_OVER_LN2_Q30 above.  The
+               Q24 log is taken to the Q16 that ambe_pow2 wants. */
+            x = ((int64_t)cur->log2Ml[l] * K_0P693_OVER_LN2_Q30) >> 30;
+            mant[l] = ambe_pow2((unsigned int)(int32_t)(x >> (AMBE_Q_LOG - 16)), &ex[l]);
+            if (!cur->Vl[l])
+                mant[l] = (int32_t)(((int64_t)mant[l] * unvc_q30) >> 30);
+            if (ex[l] > maxex)
+                maxex = ex[l];
+        }
+        /*
+         * Three bits of headroom below 2^31.  ambe_pow2's mantissas land in
+         * [2^30, 2^31), and the enhancement stage that runs next multiplies
+         * them by up to 1.2 and then by an energy-restoring gain that can
+         * reach 2, so without this the products overflow int32 and the
+         * amplitude comes out negative.
+         */
+        for (l = 1; l <= cur->L; l++) {
+            int sh = maxex - ex[l] + 3;
+            cur->Ml[l] = (sh >= 31) ? 0 : (mant[l] >> sh);
+        }
+        for (l = cur->L + 1; l <= AMBE_MAX_HARMONICS; l++)
+            cur->Ml[l] = 0;
+        cur->Ml_exp = maxex + 3;
     }
 
     if (info)

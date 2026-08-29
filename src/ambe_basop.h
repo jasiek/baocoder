@@ -91,7 +91,8 @@ unsigned int ambe_lzcount32(unsigned int x);
  * whose dynamic range does not fit a single Q format - the spectral
  * amplitudes above all.
  *
- * The value is  mant * 2^(exp - 15),  mant in Q15.
+ * The value is  mant * 2^(exp - 30), the mantissa normalised to 30
+ * significant bits - see ambe_basop.c for why that is wider than the radio's.
  */
 typedef struct {
     int32_t mant;
@@ -102,6 +103,20 @@ ambe_bf ambe_bf_add(ambe_bf a, ambe_bf b);   /* Math_FloatAdd 0x00018DD8 */
 ambe_bf ambe_bf_sub(ambe_bf a, ambe_bf b);   /* Math_FloatSub 0x00018E5C */
 int     ambe_bf_gt(ambe_bf a, ambe_bf b);    /* Math_FloatGreater 0x00018F98 */
 int     ambe_bf_lt(ambe_bf a, ambe_bf b);    /* Math_FloatLess 0x00018FCC */
+
+/*
+ * Multiply, divide and square root on the pair.  The radio's package has no
+ * multiply of its own - its callers do that inline against Math_SDiv and
+ * Math_Sqrt - so these are ours, built on its primitives and its convention.
+ */
+ambe_bf ambe_bf_mul(ambe_bf a, ambe_bf b);
+ambe_bf ambe_bf_div(ambe_bf a, ambe_bf b);
+ambe_bf ambe_bf_sqrt(ambe_bf a);           /* uses Math_Sqrt 0x00019364 */
+ambe_bf ambe_bf_from_i64(int64_t v, int q);
+
+/* Value as a plain integer scaled by 2^q, saturating.  For handing block
+   floats back to code that wants a fixed Q format. */
+int32_t ambe_bf_to_q(ambe_bf a, int q);
 
 /* Renormalise so the mantissa uses the full Q15 range. */
 ambe_bf ambe_bf_norm(ambe_bf a);

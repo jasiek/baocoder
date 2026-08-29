@@ -32,20 +32,61 @@ typedef enum {
 } ambe_frame_type;
 
 /*
+ * Fixed-point scales.  The codec this reimplements has no FPU: the radio runs
+ * ITU-T G.191 style basic operators over a block-floating-point package in
+ * IRAM, so this library is integer-only too and these are the formats it
+ * carries model parameters in.
+ *
+ *   f0      Q19 turns per sample - the firmware's own scale, the one
+ *           Vocoder_PitchFromLog2 0x0002AD6C emits and clamps
+ *   log2    Q24 - gamma and log2Ml.  Measured over 2052 real frames these
+ *           span [-7.6, 11.5], so Q24's +-128 leaves an order of magnitude of
+ *           headroom at a resolution ten times finer than float has there
+ *   phase   Q32 turns, in a wrapping uint32.  A turn is the whole range, so
+ *           the accumulator is exact modulo one turn for ever - unlike a
+ *           float, which loses mantissa bits as the phase grows
+ */
+#define AMBE_Q_F0    19
+#define AMBE_Q_LOG   24
+#define AMBE_Q_ML    31   /* Ml[l] * 2^(Ml_exp - AMBE_Q_ML) is the amplitude */
+
+/*
  * The MBE speech model parameters for one 20 ms frame.  Index 0 is unused for
  * the per-harmonic arrays; harmonics run 1..L, matching the AMBE literature.
+ *
+ * The spectral amplitudes are block floating point - one exponent shared by
+ * the whole frame, which is how the radio carries spectral data
+ * (Vocoder_NormalizeSpectralBlock 0x00022C18 normalises an array to a common
+ * exponent).  The amplitude of harmonic l is
+ *
+ *     Ml[l] * 2^(Ml_exp - AMBE_Q_ML)
+ *
+ * The radio's own spectral arrays are int16; these mantissas are int32.  That
+ * is a deliberate departure, and it is measured rather than assumed: over the
+ * 1664 real voice frames in the corpus the loudest-to-quietest amplitude
+ * spread within a single frame reaches 13.5 bits, so a 15-bit mantissa would
+ * leave the quietest harmonic in a frame under two bits.
  */
 typedef struct {
-    float   w0;                              /* fundamental, rad/sample      */
-    int     L;                               /* number of harmonics          */
-    float   gamma;                           /* frame log2 gain              */
-    uint8_t Vl[AMBE_MAX_HARMONICS + 1];      /* 1 = voiced, 0 = unvoiced     */
-    float   Ml[AMBE_MAX_HARMONICS + 1];      /* spectral amplitudes          */
-    float   log2Ml[AMBE_MAX_HARMONICS + 1];  /* log2 spectral amplitudes     */
-    float   PHIl[AMBE_MAX_HARMONICS + 1];    /* synthesis phase              */
-    float   PSIl[AMBE_MAX_HARMONICS + 1];    /* accumulated voiced phase     */
-    int     repeat;                          /* consecutive repeated frames  */
+    int32_t  f0;                             /* fundamental, Q19 turns/sample */
+    int      L;                              /* number of harmonics          */
+    int32_t  gamma;                          /* frame log2 gain, Q24         */
+    uint8_t  Vl[AMBE_MAX_HARMONICS + 1];     /* 1 = voiced, 0 = unvoiced     */
+    int32_t  Ml[AMBE_MAX_HARMONICS + 1];     /* amplitude mantissas          */
+    int      Ml_exp;                         /* their shared exponent        */
+    int32_t  log2Ml[AMBE_MAX_HARMONICS + 1]; /* log2 amplitudes, Q24         */
+    uint32_t PHIl[AMBE_MAX_HARMONICS + 1];   /* synthesis phase, Q32 turns   */
+    uint32_t PSIl[AMBE_MAX_HARMONICS + 1];   /* accumulated phase, Q32 turns */
+    int      repeat;                         /* consecutive repeated frames  */
 } ambe_parms;
+
+/*
+ * The fundamental as an angular frequency, 2*pi*f0 in Q24 radians per sample.
+ * The library works in turns throughout - a phase accumulator in turns wraps
+ * for free - and only offers this because the MBE literature and every other
+ * implementation quote w0.
+ */
+int32_t ambe_w0_q24(const ambe_parms *p);
 
 /* Per-frame diagnostics. */
 typedef struct {
@@ -109,11 +150,12 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
                                   ambe_frame_info *info);
 
 /*
- * Fundamental frequency (cycles/sample) and harmonic count for a b0 index,
- * computed by the firmware's own closed-form law rather than a table.
- * `width` is the width of the b0 field: 7 for the DMR 2450 mode.
+ * Fundamental frequency and harmonic count for a b0 index, computed by the
+ * firmware's own closed-form law rather than a table.  `width` is the width of
+ * the b0 field: 7 for the DMR 2450 mode.  f0 comes back in Q19 turns per
+ * sample, the scale Vocoder_PitchFromLog2 0x0002AD6C emits.
  */
-void ambe_pitch_from_b0(int b0, int width, float *f0, int *L);
+void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L);
 
 void ambe_init_parms(ambe_parms *cur, ambe_parms *prev, ambe_parms *prev_enh);
 void ambe_move_parms(const ambe_parms *src, ambe_parms *dst);
@@ -124,14 +166,17 @@ void ambe_move_parms(const ambe_parms *src, ambe_parms *dst);
 void ambe_enhance_spectrum(ambe_parms *cur);
 
 /*
- * Synthesise 160 float samples from the current and previous parameter sets.
+ * Synthesise 160 samples from the current and previous parameter sets.
  * `rng` carries the decoder's deterministic noise generator state.
  * uvquality selects the number of sinusoids per unvoiced band (1..64).
+ *
+ * The output is int16 PCM directly: the overlap-add window's taps are all
+ * k/50 for integer k, so the 1/50 factors out of the harmonic sum entirely
+ * and is applied once, with the codec's x7 output gain, as a single x7/50
+ * scaling here.  There is no separate float-to-int16 step to lose anything.
  */
-void ambe_synthesize(float out[AMBE_PCM_SAMPLES], ambe_parms *cur,
+void ambe_synthesize(int16_t out[AMBE_PCM_SAMPLES], ambe_parms *cur,
                      ambe_parms *prev, int uvquality, uint32_t *rng);
-
-void ambe_float_to_s16(const float in[AMBE_PCM_SAMPLES], int16_t out[AMBE_PCM_SAMPLES]);
 
 /* --------------------------------------------------------------- encoder */
 
@@ -155,8 +200,8 @@ void ambe_encode_silence(uint8_t ambe_d[AMBE_BITS]);
 #define AMBE_ANALYSIS_HISTORY 256
 
 typedef struct {
-    float win[AMBE_ANALYSIS_HISTORY];   /* sliding input window */
-    int   primed;
+    int16_t win[AMBE_ANALYSIS_HISTORY];  /* sliding input window */
+    int     primed;
 } ambe_analysis;
 
 void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],

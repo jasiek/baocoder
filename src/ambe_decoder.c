@@ -67,7 +67,6 @@ int ambe_decode_bits(ambe_decoder *d, const uint8_t ambe_d[AMBE_BITS],
 {
     ambe_frame_info local;
     ambe_frame_type type;
-    float buf[AMBE_PCM_SAMPLES];
     int errs2;
 
     if (!info) {
@@ -91,9 +90,8 @@ int ambe_decode_bits(ambe_decoder *d, const uint8_t ambe_d[AMBE_BITS],
         if (d->cur.repeat <= 3) {
             ambe_move_parms(&d->cur, &d->prev);
             ambe_enhance_spectrum(&d->cur);
-            ambe_synthesize(buf, &d->cur, &d->prev_enh, d->uvquality, &d->rng);
+            ambe_synthesize(pcm, &d->cur, &d->prev_enh, d->uvquality, &d->rng);
             ambe_move_parms(&d->cur, &d->prev_enh);
-            ambe_float_to_s16(buf, pcm);
             return 0;
         }
         /* too many repeats: mute and restart the model */

@@ -266,20 +266,38 @@ int ambe_sin_q15(int phase_q15turns)
 
 /* ---------------------------------------------------------- block float */
 
+/*
+ * The (mantissa, exponent) package.  The radio's own, at Math_FloatAdd
+ * 0x00018DD8 and its neighbours, aligns by shift and renormalises with ff1,
+ * which is what these do.  Where they depart from it is the mantissa width:
+ * the stock pairs are 16-bit, and these normalise to 30 significant bits,
+ * because they carry the spectral moments through a fourth root and a
+ * division where 16 bits would leave 3e-5 of relative error before the
+ * arithmetic even starts.
+ *
+ * The value of a pair is  mant * 2^(exp - 30).
+ */
+#define BF_BITS 30
+
 ambe_bf ambe_bf_norm(ambe_bf a)
 {
-    uint32_t shift;
+    uint32_t m;
+    int sig, d;
 
     if (a.mant == 0) {
         a.exp = 0;
         return a;
     }
-    shift = ambe_lzcount32((uint32_t)(a.mant < 0 ? ~a.mant : a.mant)) - 1;
-    a.mant <<= shift;
-    a.exp -= (int32_t)shift;
-    /* keep the mantissa in Q15 as the Math_Float* package does */
-    a.mant >>= 16;
-    a.exp += 16;
+    m = (uint32_t)(a.mant < 0 ? -(int64_t)a.mant : (int64_t)a.mant);
+    sig = 32 - (int)ambe_lzcount32(m);       /* significant bits in |mant| */
+    d = BF_BITS - sig;
+    if (d > 0) {
+        a.mant = (int32_t)((int64_t)a.mant << d);
+        a.exp -= d;
+    } else if (d < 0) {
+        a.mant >>= -d;
+        a.exp -= d;
+    }
     return a;
 }
 
@@ -287,7 +305,19 @@ ambe_bf ambe_bf_from_q(int32_t v, int q)
 {
     ambe_bf r;
     r.mant = v;
-    r.exp = 15 - q;
+    r.exp  = BF_BITS - q;
+    return ambe_bf_norm(r);
+}
+
+ambe_bf ambe_bf_from_i64(int64_t v, int q)
+{
+    ambe_bf r;
+    int sh = 0;
+    int64_t a = v < 0 ? -v : v;
+
+    while (a > 0x7fffffffLL) { a >>= 1; sh++; }
+    r.mant = (int32_t)(v >> sh);
+    r.exp  = BF_BITS - q + sh;
     return ambe_bf_norm(r);
 }
 
@@ -299,15 +329,15 @@ ambe_bf ambe_bf_add(ambe_bf a, ambe_bf b)
     if (a.mant == 0) return b;
     if (b.mant == 0) return a;
 
-    /* align the smaller exponent up, as Math_FloatAdd 0x00018DD8 does */
     if (a.exp < b.exp) {
         ambe_bf t = a; a = b; b = t;
     }
     d = a.exp - b.exp;
     if (d > 31)
         return a;
-    r.mant = a.mant + (b.mant >> d);
-    r.exp  = a.exp;
+    /* one bit of headroom so the sum cannot overflow the mantissa */
+    r.mant = (a.mant >> 1) + ((b.mant >> d) >> 1);
+    r.exp  = a.exp + 1;
     return ambe_bf_norm(r);
 }
 
@@ -317,19 +347,80 @@ ambe_bf ambe_bf_sub(ambe_bf a, ambe_bf b)
     return ambe_bf_add(a, b);
 }
 
+ambe_bf ambe_bf_mul(ambe_bf a, ambe_bf b)
+{
+    ambe_bf r;
+
+    if (a.mant == 0 || b.mant == 0) {
+        r.mant = 0; r.exp = 0;
+        return r;
+    }
+    r.mant = (int32_t)(((int64_t)a.mant * b.mant) >> BF_BITS);
+    r.exp  = a.exp + b.exp;
+    return ambe_bf_norm(r);
+}
+
+ambe_bf ambe_bf_div(ambe_bf a, ambe_bf b)
+{
+    ambe_bf r;
+
+    if (a.mant == 0 || b.mant == 0) {
+        r.mant = 0; r.exp = 0;
+        return r;
+    }
+    r.mant = (int32_t)((((int64_t)a.mant) << BF_BITS) / b.mant);
+    r.exp  = a.exp - b.exp;
+    return ambe_bf_norm(r);
+}
+
+ambe_bf ambe_bf_sqrt(ambe_bf a)
+{
+    ambe_bf r;
+    short e;
+
+    if (a.mant <= 0) {
+        r.mant = 0; r.exp = 0;
+        return r;
+    }
+    /* Math_Sqrt takes mant * 2^(exp - 31) and returns mant * 2^(exp - 15) */
+    e = (short)(a.exp - BF_BITS + 31);
+    r.mant = (int32_t)ambe_sqrt(a.mant, &e);
+    r.exp  = (int32_t)e - 15 + BF_BITS;
+    return ambe_bf_norm(r);
+}
+
+int32_t ambe_bf_to_q(ambe_bf a, int q)
+{
+    int sh = a.exp - BF_BITS + q;    /* value * 2^q = mant * 2^sh */
+    int64_t v;
+
+    if (a.mant == 0)
+        return 0;
+    if (sh >= 0) {
+        if (sh > 32)
+            return a.mant > 0 ? 0x7fffffff : (int32_t)0x80000000;
+        v = (int64_t)a.mant << sh;
+    } else {
+        if (-sh > 40)
+            return 0;
+        v = ((int64_t)a.mant + ((int64_t)1 << (-sh - 1))) >> -sh;
+    }
+    if (v >  0x7fffffffLL) return 0x7fffffff;
+    if (v < -0x80000000LL) return (int32_t)0x80000000;
+    return (int32_t)v;
+}
+
 int ambe_bf_gt(ambe_bf a, ambe_bf b)
 {
     int32_t d;
+
     if (a.mant == 0 || b.mant == 0)
         return a.mant > b.mant;
-    if (a.exp == b.exp)
-        return a.mant > b.mant;
-    d = a.exp - b.exp;
-    if (d > 31)  return a.mant > 0;
-    if (d < -31) return b.mant < 0;
-    if (d > 0)
-        return a.mant > (b.mant >> d);
-    return (a.mant >> -d) > b.mant;
+    if ((a.mant > 0) != (b.mant > 0))
+        return a.mant > 0;
+    if (a.exp != b.exp)
+        return (a.exp > b.exp) == (a.mant > 0);
+    return a.mant > b.mant;
 }
 
 int ambe_bf_lt(ambe_bf a, ambe_bf b)
