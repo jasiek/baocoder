@@ -15,14 +15,14 @@ CPPFLAGS += -Iinclude -Isrc -D_DEFAULT_SOURCE
 LDLIBS  += -lm
 
 SRC     := src/golay.c src/ambe_basop.c src/ambe_fft.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c \
-           src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_encoder.c src/rc4.c src/aes.c
+           src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_subband.c src/ambe_encoder.c src/rc4.c src/aes.c
 OBJ     := $(SRC:.c=.o)
 LIB     := libbaocoder.a
 
 TESTS   := tests/test_golay tests/test_aes tests/test_basop tests/test_fft tests/test_tables tests/test_fec \
            tests/test_params tests/test_synth tests/test_e2e \
            tests/test_encode tests/test_encode_sweep tests/test_encode_pcm \
-           tests/test_encode_voicing
+           tests/test_encode_voicing tests/test_subband
 
 THIRD   := third_party
 MBELIB  := $(THIRD)/mbelib

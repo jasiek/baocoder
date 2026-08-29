@@ -4,20 +4,10 @@ third_party/
 /firmware/
 ambe_decode
 tools/mbe_ref
-tests/test_golay
-tests/test_tables
-tests/test_fec
-tests/test_params
-tests/test_synth
-tests/test_e2e
 *.dSYM/
-tests/test_encode
-tests/test_encode_pcm
 ambe_encode
-tests/test_encode_sweep
-tests/test_aes
 tools/dmra_decrypt
-tests/test_basop
 .compare/
-tests/test_fft
-tests/test_encode_voicing
+# test binaries; the sources next to them are kept
+tests/test_*
+!tests/test_*.c
