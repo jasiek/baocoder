@@ -290,70 +290,87 @@ samples zero-padded to 256, which is the radio's arrangement, in place of the
 `test_encode_pcm` is that the analyser's level accuracy improves from ×0.93 to
 **×0.99**, with pitch unchanged at 173/191 within four quantiser steps.
 
-### Where it stops, and why
+### The module was broken, not the firmware
 
-**The FFT's inner kernels do not decompile.** `Dsp_FftStageButterfly`
-`0x00025160` and `Dsp_FftFinalStageButterfly` `0x0002509C` both return
-`halt_baddata()` at the first instruction, and Ghidra's function bounds for them
-are wrong — the listing stops mid-function at `0x000251A2`, immediately after an
-`lrw r6,0x25220` that loads what is almost certainly the twiddle pointer.
-Disassembly works where decompilation does not, so this is recoverable, but it
-means hand-translating the two kernels from raw C-SKY and repairing the bounds
-first. Everything above them in the transform —
-`Dsp_FftBitReverseScale` `0x00025224`, `Dsp_FftButterflyStage` `0x00025520`,
-`Dsp_FftForward` `0x000256D0`, `Dsp_NormalizeArray` `0x0001ADA0`,
-`Dsp_ComputeMagnitudeSquared` `0x0001AB38` — decompiles cleanly.
+The FFT's inner kernels would not decompile — `Dsp_FftStageButterfly`
+`0x00025160` and `Dsp_FftFinalStageButterfly` `0x0002509C` both emitted
+`halt_baddata()` at their first line — and the cause turned out to be a gap in
+the Ghidra processor module rather than anything about the image.
 
-**The decision layer is coupled to the transform's data layout.** The pitch and
-voicing search reads an int32 array that `Vocoder_UpdateEnergyAndHistory`
-`0x000217CC` writes into the same context region the rolling window occupies.
-Transcribing the search while feeding it a differently-scaled spectrum of our
-own would produce something that reads like the radio's algorithm and is not
-one. That is the failure mode this project's rules exist to prevent.
-
-**And one name in the ledger looks wrong.** `Vocoder_SelectVoicingCandidate`
-`0x000177F0` carries a MEDIUM-confidence name, and the evidence says it selects
-a *pitch* candidate rather than a voicing decision. Its helper
-`Dsp_FindMaxEnergyBlockIndex` `0x000177B0` sums five consecutive int32 at four
-candidate offsets taken from tables at SRAM `0x1800140C` and `0x1800141C`, whose
-first four entries are
+`taligentx/ghidra_csky_ck804` v0.2 implements the unsigned `mulu`/`mulua`/`mulus`
+family (32×32 into the `hi:lo` accumulator) and the plain `mulsh`, but not the
+signed 32×32 family nor `mulsh`'s accumulating variants:
 
 ```
-0x1800140C:  20  23  25  28      and then  19808 21889 24199 26755
-0x1800141C:  37  41  45  50                 9929 11005 12182 13433
-0x1800142C:  17  19  22  24                17234 19030 21242 23421
+i32_r_sop = 0b100011  pcode 1/2/4  ->  muls / mulsa / mulss
+i32_r_sop = 0b100100  pcode 2/4    ->  mulsha / mulshs
 ```
 
-Those offsets are pitch lags, in bands roughly an octave apart, and the second
-half of each row is a per-lag weight that runs proportional to the lag. The
-function returns values like `0x13` (19) and `0x3A` (58) — lags again — into a
-slot that behaves as a previous-pitch memory. So this is a two-band pitch
-candidate search with an octave decision: structurally the same job as the
-octave guard in `ambe_analysis.c`, done properly.
+Ghidra's flow analysis stops dead at an instruction it cannot decode, so every
+function containing one is silently truncated. The encodings were identified by
+their neighbours rather than from a manual — each has the shape of the unsigned
+family one sop lower, and the C-SKY V2 multiply group pairs unsigned and signed
+families adjacently — and a table learned from 884 register-ALU instructions
+that Ghidra *does* decode confirmed none of the five appeared in the implemented
+set.
 
-Naming it correctly is a prerequisite for transcribing it, and that belongs in
-the reverse-engineering project's ledger as a `CORRECTION` row, not here.
+Confirmed by result, not by the reasoning. On bytes Ghidra had never reached,
+the first family decodes as `muls r0,r2 / mfhi r12 / mflo r0` — the accumulator
+read that has to follow it. `docs/patches/csky-muls-family.patch` carries the
+fix, in the same form as the reverse-engineering project's existing
+`csky-movih-truncation.patch`.
 
-### What moving the boundary takes
+One trap worth recording: a corrected sleigh does not by itself fix a program
+Ghidra has already failed on. It records an error at the address and will not
+retry, so `ClearAndRedisasm.java` and `RepairTruncated.java` beside the patch
+clear the stale code units and re-disassemble.
 
-In order, each independently verifiable:
+What it recovered:
 
-1. Repair the function bounds on `0x00025160` and `0x0002509C` in Ghidra and
-   hand-translate the two butterfly kernels from disassembly (26 instructions
-   each before the truncation point).
-2. Extract the FFT's bit-reversal permutation tables (SRAM `0x180014E0` for
-   size 32, `0x18001514` otherwise) and the twiddle table behind `0x00025220`.
-3. Transcribe the transform and check it against a reference DFT, the way
-   `tests/test_basop.c` checks the primitives.
-4. Settle the role of `Vocoder_SelectVoicingCandidate` and transcribe
-   `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, decompiles clean),
-   which produces the array it searches.
-5. Then the pitch and voicing decisions, and `Vocoder_AnalyzeSpectrum`
-   `0x000205B8` — whose own callee `Vocoder_NormalizeSpectralArrays`
-   `0x0002A70C` truncates at 28 lines and needs the same bounds repair.
+| function | before | after |
+|---|---|---|
+| `Dsp_FftStageButterfly` `0x00025160` | 68 bytes, truncated | 190 bytes, **0 warnings** |
+| `Dsp_FftFinalStageButterfly` `0x0002509C` | 68 bytes, truncated | 190 bytes, **0 warnings** |
+| `Dsp_FftButterflyRecurse` `0x00025484` | 40 bytes, truncated | 150 bytes, **0 warnings** |
+| `Vocoder_AnalyzeSpectrum` `0x000205B8` | 393 lines, 10 warnings | 746 lines, **0 warnings** |
+| `Vocoder_SynthesizeVoiced` `0x0001DE10` | 366 bytes, 9 warnings | 2378 bytes, **0 warnings** |
 
-Step 3 is where a wrong transcription would first become visible, which is why
-it comes before anything that consumes the spectrum.
+`Vocoder_AnalyzeSpectrum` is the speech analyser's main body. It had been
+decompiling as a third of itself.
+
+### What the transform turns out to be
+
+With the kernels readable, the butterfly is textbook:
+
+```
+a = X + W·Y,   b = X − W·Y
+Re(W·Y) = wr·yr − wi·yi,   Im(W·Y) = wi·yr + wr·yi
+```
+
+in Q15, the intermediate stage shifting `>>15` and the final stage `>>16` — the
+block-float step `Dsp_FftBitReverseScale`'s exponent bookkeeping accounts for.
+The whole chain is a 128-point *complex* FFT over 256 real samples packed
+even/odd into re/im, with `Dsp_FftButterflyStage` doing the real-spectrum
+unpacking afterwards. Its three tables are now extracted and asserted against
+what they must reproduce (`tests/test_tables.c`): 256 twiddles of
+`exp(−j2πk/512)` to 1 LSB, and two delta-coded permutation tables that decode to
+the bit-reversal of N=32 and N=128 exactly.
+
+### What remains
+
+The transform is now fully readable but not yet written in C. In order:
+
+1. Transcribe the FFT into `src/ambe_fft.c` and check it against a reference
+   DFT, the way `tests/test_basop.c` checks the primitives. This is where a
+   wrong transcription would first become visible, so it comes before anything
+   that consumes the spectrum.
+2. Settle the role of `Vocoder_SelectVoicingCandidate` `0x000177F0` — the
+   evidence says pitch, not voicing — and transcribe
+   `Vocoder_UpdateEnergyAndHistory` `0x000217CC`, which builds the array it
+   searches.
+3. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, and the pitch and
+   voicing decisions. Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C`
+   still truncates at 28 lines — a different blocker, not this one.
 
 ## Still open
 
