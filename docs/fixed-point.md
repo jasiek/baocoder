@@ -779,7 +779,7 @@ The analyser's voicing and pitch are the two open stages, and the work is now
 specified rather than exploratory.
 
 **What is already written.** `src/ambe_subband.c` carries four of the
-16-channel stage's five pieces, all checked in `tests/test_subband.c` against
+16-channel stage's six pieces, all checked in `tests/test_subband.c` against
 something other than themselves: the folded window, the 32-point real DFT
 (98 cases, worst 1.50 LSB against a direct DFT), the `|X|² × 2 >> 7` energy
 accumulation (Parseval to 0.01 %, which pins the two scale constants and the
