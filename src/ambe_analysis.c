@@ -48,6 +48,7 @@
 #include <string.h>
 #include "ambe.h"
 #include "ambe_basop.h"
+#include "ambe_fft.h"
 #include "ambe_tables.h"
 
 #define NFFT 256
@@ -59,8 +60,14 @@
  * path is Ml -> overlap-added sinusoids -> x7 on the way to int16, so the
  * inverse carries a fixed constant; it is calibrated so that encoding a decoded
  * frame reproduces its gain (tests/test_encode_pcm.c holds that to 1.5 dB).
+ *
+ * The constant changed when the transform did: it is in the firmware FFT's
+ * block-float units now, not the old DFT's.  Sweeping it shows the measured
+ * level moving in plateaus rather than continuously, because the frame gain
+ * is quantised to 32 steps - 0.96 is the closest reachable to unity, and
+ * anything from 28000 to 31846 lands on it.
  */
-#define AMBE_ML_SCALE_Q16 2981888        /* 45.5 in Q16 */
+#define AMBE_ML_SCALE_Q16 30000       /* 0.4578 in Q16 */
 
 /* ln2 / 0.693, undoing the truncated ln2 the decoder's amplitude step uses */
 #define K_LN2_OVER_0P693_Q30 1074765414
@@ -73,20 +80,6 @@
 /* "no periodicity at all": a normalised correlation below 0.35, Q15 */
 #define UNVOICED_SCORE_Q15 11469
 
-/*
- * The analysis window is the radio's own, not a generated one:
- * SRAM 0x180010A8, extracted by tools/extract_tables.py, half of a 199-point
- * Hamming that Dsp_WindowAndComputeFft 0x00019B6C folds symmetrically before a
- * 256-point transform.  That geometry - 199 windowed samples zero-padded to
- * 256, rather than 256 windowed samples - is the radio's, and it is what this
- * uses.  The transform below is still a plain DFT, not the firmware's
- * block-floating-point FFT; see docs/fixed-point.md for why that piece is not
- * transcribed yet.
- */
-static int32_t anwin(int i)
-{
-    return ambe_anwin_q15[i < 100 ? i : (AMBE_ANWIN_N - 1 - i)];
-}
 
 /*
  * Normalised cross-correlation at one lag, as a block float.  The sums are
@@ -115,8 +108,8 @@ static ambe_bf ncc(const int16_t *x, int len, int lag)
 void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
                   ambe_parms *out)
 {
-    int32_t re[NFFT / 2 + 1], im[NFFT / 2 + 1];
-    ambe_bf mag[NFFT / 2 + 1];
+    int32_t magsq[NFFT / 2 + 1], fftbuf[NFFT];
+    short fft_exp;
     ambe_bf best, score;
     int32_t f0;
     int i, k, l, L, lag, bestlag;
@@ -183,29 +176,15 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
     out->f0 = f0;
     out->L  = L;
 
-    /* ---- spectrum: the newest 199 samples windowed, zero-padded to 256 */
-    {
-        int32_t win[NFFT];
-        int base = AMBE_ANALYSIS_HISTORY - AMBE_ANWIN_N;
-        for (i = 0; i < NFFT; i++)
-            win[i] = (i < AMBE_ANWIN_N)
-                   ? ((int32_t)a->win[base + i] * anwin(i)) / AMBE_ANWIN_PEAK
-                   : 0;
-        for (k = 0; k <= NFFT / 2; k++) {
-            int64_t sr = 0, si = 0;
-            for (i = 0; i < NFFT; i++) {
-                /* the phase is k*i/NFFT of a turn, exact in Q15 units */
-                int phase = (k * i * (32768 / NFFT)) & 0x7FFF;
-                sr += (int64_t)win[i] * ambe_cos_q15(phase);
-                si -= (int64_t)win[i] * ambe_sin_q15(phase);
-            }
-            re[k] = (int32_t)(sr >> 15);
-            im[k] = (int32_t)(si >> 15);
-        }
-        for (k = 0; k <= NFFT / 2; k++)
-            mag[k] = ambe_bf_sqrt(ambe_bf_from_i64((int64_t)re[k] * re[k] +
-                                                   (int64_t)im[k] * im[k], 0));
-    }
+    /*
+     * The spectrum is the radio's own front end: its 199-point Hamming window
+     * folded into a 256-point block-floating-point transform, which is a
+     * 128-point complex FFT over the real samples packed even/odd.  See
+     * src/ambe_fft.c; tests/test_fft.c holds it against a reference DFT.
+     */
+    memset(fftbuf, 0, sizeof(fftbuf));
+    fft_exp = ambe_fft_window(magsq, a->win + (AMBE_ANALYSIS_HISTORY - AMBE_ANWIN_N),
+                              AMBE_ANWIN_N, -7, fftbuf, 8, 1);
 
     /* ---- per-harmonic amplitudes, and per-band voicing */
     {
@@ -230,8 +209,7 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
             if (lo < 1) lo = 1;
             if (hi > NFFT / 2) hi = NFFT / 2;
             for (k = lo; k <= hi; k++) {
-                /* |mag|^2 with the block float taken back to an int64 */
-                int64_t m = (int64_t)re[k] * re[k] + (int64_t)im[k] * im[k];
+                int64_t m = magsq[k];
                 int32_t d = (k << 16) - c_q16;
                 sum += m;
                 if (d < 0) d = -d;
@@ -241,8 +219,11 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
             }
             if (cnt < 1) { sum = 0; cnt = 1; }
 
-            /* Ml = sqrt(sum/cnt) / 45.5 */
-            amp = ambe_bf_sqrt(ambe_bf_from_i64(sum / cnt, 0));
+            /* Ml = sqrt(sum/cnt) / 45.5, with the transform's block-float
+               exponent folded back in before the root */
+            amp = ambe_bf_from_i64(sum / cnt, 0);
+            amp.exp += fft_exp;
+            amp = ambe_bf_sqrt(ambe_bf_norm(amp));
             amp = ambe_bf_div(amp, ambe_bf_from_q(AMBE_ML_SCALE_Q16, 16));
             {
                 int sh = 0;

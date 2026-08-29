@@ -19,3 +19,4 @@ tests/test_aes
 tools/dmra_decrypt
 tests/test_basop
 .compare/
+tests/test_fft
