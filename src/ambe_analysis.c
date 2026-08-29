@@ -94,12 +94,20 @@
  * decibel of level for one point on a decision that carries no information is
  * a bad trade, so the constant stays.
  *
- * The fix is not a constant.  The firmware's rule is known now -
- * Vocoder_SelectSpectralSubbands 0x0002AA20, voiced when E_harm/E_total > 0.80
- * - and its 0.80 does not transfer, scoring 35% here: its denominator starts
- * at a pitch-dependent bin and its numerator sums a window on the harmonic
- * grid.  A different measure, not a different constant.  docs/fixed-point.md
- * carries the details.
+ * The fix is not a constant, and - measured - it is not the firmware's
+ * spectrum either.  The firmware's rule is known (Vocoder_SelectSpectralSubbands
+ * 0x0002AA20, voiced when E_harm/E_total > 0.80) and its 0.80 does not transfer,
+ * scoring 35% here.  The obvious conclusion was that the radio's higher
+ * resolution is what makes 0.80 work, so tools/proto_voicing.py tested that
+ * over the corpus at a range of window lengths: it does not.  AUC moves from
+ * 0.615 to at best 0.630 and then falls, and in the four bands where the prior
+ * is near 50% and a decision would actually pay, the measure sits at chance.
+ *
+ * What the same run says is that the decision is the wrong shape.  12 of the 16
+ * codebook voicing patterns are a pure voiced-then-unvoiced cutoff, so this is
+ * nearly a single number rather than eight independent bits - and per-band
+ * priors alone score 70% against this estimator's 48%.  docs/fixed-point.md,
+ * "Resolution is not the bottleneck", carries the tables.
  */
 #ifndef VOICE_NUM
 #define VOICE_NUM 60

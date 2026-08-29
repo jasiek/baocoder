@@ -645,16 +645,101 @@ is the flat plateau from the threshold sweep: overlapping distributions plus a
 2:1 voiced prior push the best decision far below the midpoint, toward
 answering "voiced" always.
 
-The cause is resolution. **Over 93 % of the corpus's bands have fewer than 4
-bins per harmonic**, where a 199-sample window's main lobe is comparable to the
-harmonic spacing itself, so the ±step/4 window cannot isolate a harmonic from
-its neighbours and the ratio saturates around 0.4 whatever the voicing. The
-radio does not have this problem because it does not measure on this spectrum:
-it measures on eight sub-band transforms, which is what the filterbank below
-exists to provide.
+The apparent cause is resolution. **Over 93 % of the corpus's bands have fewer
+than 4 bins per harmonic**, where a 199-sample window's main lobe is comparable
+to the harmonic spacing itself, so the ±step/4 window cannot isolate a harmonic
+from its neighbours and the ratio saturates around 0.4 whatever the voicing. The
+radio does not measure on this spectrum: it measures on eight sub-band
+transforms, which is what the filterbank below provides.
 
-So the fix really is the filterbank, and the diagnosis says why rather than
-merely that.
+**That conclusion was tested, and it is wrong.** See the section below.
+
+### Resolution is not the bottleneck — measured
+
+Transcribing the filterbank exactly is days of work, so before committing to it
+the premise was tested directly, in float, by
+`tools/proto_voicing.py` over the same corpus (2052 frames, 8928 bands, truth
+from the radio's own bitstream). It runs the *same* measure at a range of
+window lengths, which isolates the one variable the diagnosis names. The
+filterbank's own effective window is 58 decimated samples = **464 original
+samples**, so that row is the one that matters.
+
+| window | nfft | bins/harm | separation | best acc | kappa | AUC |
+|---|---|---|---|---|---|---|
+| 199 | 256 | 2.86 | +0.069 | 0.672 | 0.000 | 0.615 |
+| 199 | 512 | 5.73 | +0.065 | 0.672 | 0.000 | 0.624 |
+| **320** | 512 | 5.73 | **+0.116** | 0.672 | 0.000 | **0.630** |
+| **464** | 512 | 5.73 | +0.113 | 0.672 | 0.000 | 0.622 |
+| 464 | 1024 | 11.45 | +0.105 | 0.672 | 0.000 | 0.623 |
+| 640 | 1024 | 11.46 | +0.092 | 0.672 | 0.000 | 0.608 |
+| 928 | 1024 | 11.45 | +0.075 | 0.672 | 0.000 | 0.594 |
+
+Three things, and they settle it.
+
+**Resolution barely moves the measure, and then makes it worse.** Going from
+2.86 to 11.45 bins per harmonic — a 4× improvement, more than the filterbank
+buys — moves AUC by less than 0.02. It peaks at a *moderate* window (320
+samples) and falls away above it, because speech stops being stationary well
+before 100 ms. At the filterbank's own 464 samples the AUC is 0.622 against the
+current 0.615: no useful difference. Note also that zero-padding alone (199/256
+→ 199/512) does nothing, which is the sanity check that the harness measures
+resolution rather than bin count.
+
+**Best achievable accuracy equals the trivial baseline at every setting, with
+kappa 0.000.** Not "barely beats" — *equals*, because with a 2:1 voiced prior
+and AUC ≈ 0.62 no single threshold does better than answering "voiced".
+
+**And the measure is uninformative exactly where the decision is hard.** Per
+band, at the best window:
+
+| band | % voiced | AUC | baseline | best acc |
+|---|---|---|---|---|
+| 0 | 100.0 | — | 1.000 | 1.000 |
+| 1 | 92.7 | 0.646 | 0.927 | 0.927 |
+| 2 | 78.0 | 0.584 | 0.780 | 0.780 |
+| 3 | 62.6 | 0.534 | 0.626 | 0.626 |
+| 4 | 63.6 | **0.494** | 0.636 | 0.636 |
+| 5 | 52.8 | **0.509** | 0.528 | 0.586 |
+| 6 | 47.0 | **0.502** | 0.530 | 0.634 |
+| 7 | 41.1 | **0.489** | 0.589 | 0.651 |
+
+Where the prior is strong (bands 0–3) the ratio has some signal and cannot use
+it. Where the prior is near 50 % and a decision would actually pay (bands 4–7)
+the ratio is at chance — AUC 0.489 to 0.509. **No amount of spectral
+resolution repairs an AUC of 0.49**, because the information is not there to
+sharpen.
+
+So transcribing the filterbank will not fix voicing. It is still wanted for
+bit-exactness and it is still on the path for pitch, but it should not be
+undertaken *for voicing's sake* on the strength of the resolution argument.
+
+### What would actually help
+
+The same run says where the score is. The voicing pattern is not eight
+independent bits: the encoder picks one of 16 codebook entries, **12 of which
+are a pure voiced-then-unvoiced cutoff**, and the other four differ from a
+cutoff by a single bit. Band 0 is voiced in all sixteen; band 1 in fifteen.
+So the decision is very nearly "where is the cutoff", a single number 1..8.
+
+Scored on the same 8928 bands:
+
+| decision | accuracy |
+|---|---|
+| the shipped estimator | **0.480** |
+| always voiced | 0.672 |
+| per-band prior alone, ignoring the audio | 0.702 |
+| per-band prior + the ratio | 0.730 |
+
+The shipped estimator is 19 points *below* ignoring the audio entirely. The
+cheap, large win is restructuring the decision — pick a cutoff, or score the
+16 codebook patterns directly — not sharpening the spectrum it is fed.
+
+Two honest limits on this. The sweep uses a long window as a proxy for the
+filterbank, and the filterbank bandlimits before decimating, which is not the
+identical operation; and the per-band priors are measured on six captures, so
+using them as constants would be fitting this corpus. Neither weakens the
+binding result, which is about the *measure* rather than the spectrum: AUC 0.49
+in the bands that matter.
 
 ### The filterbank, mapped
 
@@ -674,13 +759,20 @@ an exponent-aligned add, not a store:
 eighth band's tail runs into the adjacent scratch buffer, which the code then
 uses deliberately.
 
-**Two sub-frames per band**, combined the same way. Each is a **58-sample**
-segment (`0x3A`), windowed by a folded 58-tap table, zero-padded into a
-**64-point** transform (`Dsp_FftForward(…, 6, 0)`), then `|X|² × 2` over
-**32 bins** with bins 0 and 1 zeroed. Per-band block-float exponents go to
-`asStack_40[8]` — `Vocoder_SelectSpectralSubbands`'s fourth argument.
+**Two channels per band**, combined the same way — not two time segments, which
+is what the strides say: the ring pointer advances 49 within a band and 98
+between bands, and 98 = 2 × 49 is two channels of the 16 × 49 ring. Eight bands
+× two channels is exactly the sixteen the stage below produces. Each channel
+contributes a **58-sample** segment (`0x3A`), windowed by a folded 58-tap table,
+zero-padded into a **64-point** transform (`Dsp_FftForward(…, 6, 0)`), then
+`|X|² × 2` over **32 bins** with bins 0 and 1 zeroed. Per-band block-float
+exponents go to `asStack_40[8]` — `Vocoder_SelectSpectralSubbands`'s fourth
+argument.
 
-Input strides: per sub-frame 49 and 11 samples; per band 22 and 98.
+The 58 samples are not all history: the copy pair takes `58 − n` from the ring
+and `n` from the frame's new samples, where `n` is the count
+`Vocoder_AnalyzeSubbandSpectrum` returned. Input strides: 49 and 11 per channel,
+98 and 22 per band.
 
 **A third window table**, at SRAM `0x18001484..0x180014BC` (file `0x064B44`):
 29 half-taps applied symmetrically, matching the 58-sample segment. Its
@@ -820,13 +912,23 @@ tables are extracted and asserted.
    `tests/test_fft.c` exercises it at 64 points as well as 256 — a different
    path (one fewer radix-2 stage, the N = 32 bit-reversal table, a shallower
    unpack), which until now was never tested at all.
-3. **Then the voicing rule drops on top**, already fully read: per band,
-   `E_harm/E_total > 0.80` with `pitch` = this library's `f0` (Q19) shifted
-   right by two, and a per-band octave alternative above 200 Hz. When it lands,
-   `tests/test_encode_voicing.c` stops being a characterisation test and
-   becomes a pass/fail one. The success criterion is concrete: the ratio's
-   voiced/unvoiced separation should be much greater than the 0.11 measured on
-   the current spectrum.
+3. **The voicing rule** is fully read — per band, `E_harm/E_total > 0.80` with
+   `pitch` = this library's `f0` (Q19) shifted right by two, and a per-band
+   octave alternative above 200 Hz — but **do not expect it to fix voicing**,
+   and do not do items 1 and 2 for voicing's sake. `tools/proto_voicing.py`
+   measured the premise directly and it does not hold: at the filterbank's own
+   effective window the AUC is 0.622 against the current 0.615, and in bands
+   4–7, where the prior is near 50 % and a decision would pay, the measure is
+   at chance (AUC 0.489–0.509). Resolution is not the bottleneck. The section
+   "Resolution is not the bottleneck — measured" has the numbers.
+
+   The voicing win is a **separate, cheaper piece of work**: the decision is
+   near enough "where is the voiced/unvoiced cutoff", since 12 of the 16
+   codebook patterns are a pure cutoff and the rest differ by one bit. Per-band
+   priors alone score 0.702 and priors plus the ratio 0.730, against the
+   shipped estimator's 0.480 — so restructuring the decision is worth about
+   25 points and needs no filterbank at all. That is the highest-value item on
+   this list.
 4. `Vocoder_AnalyzeSpectrum` `0x000205B8` (747 lines, clean) also carries the
    amplitude path — the band-energy loop at its tail, groups of 5 then 8 bins
    scaled by `0x4800`.
@@ -839,7 +941,8 @@ tables are extracted and asserted.
    without it.
 
 Pitch remains the weakest measured stage (173/191 within four quantiser steps,
-one octave error) and voicing the worst (48 % against a 67 % trivial baseline).
+one octave error) and voicing the worst (48 % against a 67 % trivial baseline —
+and against 70 % for ignoring the audio and using the per-band priors).
 
 **Three traps, all of which cost real time.** The tables are nonsense against
 `DM32UV_L01_048.bin` — the SRAM image that `BASE = 0x0636C0` maps is the one in
@@ -867,6 +970,14 @@ that consumes them is what is missing, not the data.
 ```
 make && make test              # includes check-fixedpoint
 python3 tools/compare_precision.py
+```
+
+The voicing experiment, which needs the corpus decoded to continuous PCM first:
+
+```
+cc -O2 -std=c99 -Iinclude -Isrc tools/dump_corpus.c libbaocoder.a -lm -o dump_corpus
+mkdir -p /tmp/corpus && ./dump_corpus /tmp/corpus tests/fixtures/dm32_*.ambe49
+python3 tools/proto_voicing.py /tmp/corpus        # needs numpy
 ```
 
 The comparison builds four decoders — this branch, the float library on the

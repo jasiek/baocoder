@@ -20,9 +20,12 @@
  *
  * Retuning does not fix it - see the comment on VOICE_NUM in ambe_analysis.c
  * for the sweep and for why the best available value is not worth its cost in
- * level.  The firmware's own measure is known (Vocoder_SelectSpectralSubbands
- * 0x0002AA20) and is a different denominator, not a different constant;
- * transcribing it is the fix.
+ * level.  Neither does the radio's own spectrum: tools/proto_voicing.py
+ * measured that premise over this corpus and the measure is at chance in the
+ * bands where a decision would pay, whatever the resolution.  What the same run
+ * points at is the shape of the decision - 12 of the 16 codebook patterns are a
+ * pure voiced/unvoiced cutoff, and per-band priors alone score 70% against the
+ * 48% here.  docs/fixed-point.md, "Resolution is not the bottleneck".
  *
  * SPDX-License-Identifier: ISC
  */
