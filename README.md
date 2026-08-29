@@ -367,11 +367,15 @@ exercised by real data.
 
 ## Limitations
 
-* The analyser is a conventional MBE estimator, not the firmware's search, so
-  encoded audio is not bit-identical to what the radio would produce from the
-  same input — only the quantiser below it is exact. It is fixed point like the
-  rest of the library, but converted rather than transcribed;
-  `docs/fixed-point.md` lists the stock functions a transcription would need.
+* The analyser is only partly the firmware's. Its window is: a 199-point
+  Hamming read out of the image at SRAM `0x180010A8`, used with the radio's
+  199-into-256 geometry. The transform and the pitch and voicing decisions
+  around it are still a conventional MBE estimator, because the FFT's two
+  butterfly kernels (`Dsp_FftStageButterfly` `0x00025160`,
+  `Dsp_FftFinalStageButterfly` `0x0002509C`) do not decompile and have broken
+  function bounds. So encoded audio is not bit-identical to what the radio
+  would produce from the same input — only the quantiser below it is exact.
+  `docs/fixed-point.md` records where the boundary is and what moving it takes.
 * b1 is not uniquely recoverable when a frame's voicing is degenerate: the
   32-entry table has only 13 distinct 8-band patterns, and bands no harmonic
   maps to are never read.

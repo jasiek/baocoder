@@ -69,6 +69,18 @@ the normalisation shift.  The 512-entry table is a *cosine* table despite the
 g_awSineTable512 name it carries in the reverse-engineering ledger: it matches
 32767*cos(2*pi*i/512) to within one LSB at every one of its 512 points.
 
+THE ANALYSIS WINDOW
+-------------------
+Vocoder_ProcessFrame 0x00016E04 - the speech analyser's per-frame entry point,
+which takes PCM in - hands Dsp_WindowAndComputeFft 0x00019B6C a window table
+from its literal pool at 0x00016F38, with nInLen = 199 and an FFT size of 2^8.
+The pool reads 0x180010A8, file 0x064768.
+
+The stock code stores only half the window and folds it symmetrically, so the
+table is 100 entries for a 199-point window.  It is a Hamming window: scaled by
+its own peak, 29883, it reproduces 0.54 - 0.46*cos(2*pi*i/198) at all 100
+points to within a count.  tests/test_tables.c asserts that.
+
 The block-length table is one uint16 per L (L = 9..56), holding four 4-bit
 fields, least significant first, each biased by +2:
 
@@ -104,6 +116,9 @@ MATH_TABLES = [
      "Math_Sqrt 0x00019364 / Math_SqrtScaled 0x000193E0, two sets of 6"),
     ("ambe_cos512_q15",     0x18001630, 512,   8,
      "Math_TableInterpLookup 0x00019000, cos(2*pi*i/512)"),
+    ("ambe_anwin_q15",      0x180010a8, 100,   8,
+     "Dsp_WindowAndComputeFft 0x00019B6C via Vocoder_ProcessFrame 0x00016E04's "
+     "pool at 0x00016F38; half of a 199-point Hamming window"),
 ]
 
 LMPRBL_SRAM = 0x18002030

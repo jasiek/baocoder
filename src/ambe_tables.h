@@ -47,4 +47,16 @@ extern const short ambe_pow2_coeff_q15[6];   /* Math_Pow2 0x000191C0     */
 extern const short ambe_sqrt_coeff_q15[12];  /* Math_Sqrt 0x00019364     */
 extern const short ambe_cos512_q15[512];     /* Math_TableInterpLookup   */
 
+/*
+ * The speech analyser's window, SRAM 0x180010A8.  Vocoder_ProcessFrame
+ * 0x00016E04 - which takes PCM in, and is the encoder front end despite
+ * sitting under a task named Vocoder_RxTask - hands this to
+ * Dsp_WindowAndComputeFft 0x00019B6C with nInLen = 199 and a 256-point
+ * transform.  Only half is stored; the stock code folds it symmetrically.
+ * It is a Hamming window (tests/test_tables.c asserts that), peak 29883.
+ */
+#define AMBE_ANWIN_N    199   /* the window's full length          */
+#define AMBE_ANWIN_PEAK 29883 /* its centre tap, the table's scale  */
+extern const short ambe_anwin_q15[100];
+
 #endif

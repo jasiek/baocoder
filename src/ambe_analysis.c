@@ -1,14 +1,25 @@
 /*
  * ambe_analysis.c - 160 PCM samples -> MBE model parameters, in fixed point.
  *
- * This is the one stage with no counterpart transcribed.  The stock analyser
- * is spread across the pitch/voicing cluster (Vocoder_SelectVoicingCandidate
- * 0x000177F0, Vocoder_RefinePitchEstimate 0x00025A60,
- * Vocoder_AnalyzeSpectrum 0x000205B8, Dsp_WindowAndComputeFft 0x00019B6C) and
- * is a dense multi-candidate search with its own energy-block structure.  What
- * is implemented here is a conventional MBE analyser producing the same
- * parameter set - the estimator is ours, the quantiser it feeds
- * (ambe_encode_params.c) is the firmware's.
+ * This is the one stage only partly transcribed, and the split is worth being
+ * precise about.
+ *
+ * The stock analyser is Vocoder_ProcessFrame 0x00016E04: it takes PCM in,
+ * scales it (Vocoder_ScaleSamplesForAnalysis 0x00018BCC), keeps a three-deep
+ * rolling window of 258 samples, windows 199 of them into a 256-point
+ * block-floating-point FFT (Dsp_WindowAndComputeFft 0x00019B6C), and runs a
+ * spectral analysis and a pitch-candidate search over the result.  It sits
+ * under a task named Vocoder_RxTask, which is about receiving audio, not RF -
+ * Vocoder_TxTask calls none of it.
+ *
+ * What is transcribed here is the window and its geometry: the table below is
+ * the radio's, and the 199-into-256 arrangement is the radio's.  What is not
+ * is the transform (the FFT's two butterfly kernels do not decompile) or the
+ * pitch and voicing decisions that consume it.  So the estimator around the
+ * window is still ours - a conventional MBE analyser producing the same
+ * parameter set - and the quantiser it feeds (ambe_encode_params.c) is the
+ * firmware's.  docs/fixed-point.md records exactly where the boundary is and
+ * what moving it would take.
  *
  * It is integer arithmetic like the rest of the library, and for the same
  * reason: the radio's analyser is fixed point too, so a float estimator here
@@ -24,7 +35,7 @@
  *
  * Voicing is decided per band from how much of the band's energy sits at the
  * harmonic peaks, and the spectral amplitudes are RMS values over each
- * harmonic's band of a Hamming-windowed 256-point DFT.
+ * harmonic's band of the windowed spectrum.
  *
  * Two of its decisions are thresholds rather than arithmetic - the voicing
  * ratio and the octave guard - and both are evaluated here by exact integer
@@ -37,6 +48,7 @@
 #include <string.h>
 #include "ambe.h"
 #include "ambe_basop.h"
+#include "ambe_tables.h"
 
 #define NFFT 256
 #define PITCH_MIN 20        /* f0 = 0.0500 */
@@ -61,21 +73,19 @@
 /* "no periodicity at all": a normalised correlation below 0.35, Q15 */
 #define UNVOICED_SCORE_Q15 11469
 
-static int16_t hamming_q15[NFFT];
-static int     hamming_ready;
-
-static void hamming_init(void)
+/*
+ * The analysis window is the radio's own, not a generated one:
+ * SRAM 0x180010A8, extracted by tools/extract_tables.py, half of a 199-point
+ * Hamming that Dsp_WindowAndComputeFft 0x00019B6C folds symmetrically before a
+ * 256-point transform.  That geometry - 199 windowed samples zero-padded to
+ * 256, rather than 256 windowed samples - is the radio's, and it is what this
+ * uses.  The transform below is still a plain DFT, not the firmware's
+ * block-floating-point FFT; see docs/fixed-point.md for why that piece is not
+ * transcribed yet.
+ */
+static int32_t anwin(int i)
 {
-    int i;
-    if (hamming_ready)
-        return;
-    for (i = 0; i < NFFT; i++) {
-        /* 0.54 - 0.46*cos(2*pi*i/(N-1)); the phase is i/(N-1) of a turn */
-        int phase = (int)(((int32_t)i * 32768 + (NFFT - 1) / 2) / (NFFT - 1));
-        int32_t c = ambe_cos_q15(phase);
-        hamming_q15[i] = (int16_t)(17694 - (int32_t)((15073LL * c) >> 15));
-    }
-    hamming_ready = 1;
+    return ambe_anwin_q15[i < 100 ? i : (AMBE_ANWIN_N - 1 - i)];
 }
 
 /*
@@ -110,8 +120,6 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
     ambe_bf best, score;
     int32_t f0;
     int i, k, l, L, lag, bestlag;
-
-    hamming_init();
 
     /* slide the history window on by one frame */
     memmove(a->win, a->win + AMBE_PCM_SAMPLES,
@@ -175,11 +183,14 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
     out->f0 = f0;
     out->L  = L;
 
-    /* ---- spectrum of the most recent 256 samples, Hamming windowed */
+    /* ---- spectrum: the newest 199 samples windowed, zero-padded to 256 */
     {
         int32_t win[NFFT];
+        int base = AMBE_ANALYSIS_HISTORY - AMBE_ANWIN_N;
         for (i = 0; i < NFFT; i++)
-            win[i] = ((int32_t)a->win[i] * hamming_q15[i]) >> 15;
+            win[i] = (i < AMBE_ANWIN_N)
+                   ? ((int32_t)a->win[base + i] * anwin(i)) / AMBE_ANWIN_PEAK
+                   : 0;
         for (k = 0; k <= NFFT / 2; k++) {
             int64_t sr = 0, si = 0;
             for (i = 0; i < NFFT; i++) {

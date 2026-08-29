@@ -253,24 +253,112 @@ to 1e-4. No tolerance was widened.
 `tests/test_basop.c` is new — 10 621 checks sweeping the transcribed primitives
 against libm across their whole domains.
 
+## Transcribing the radio's analyser
+
+Attempted after the rest landed. Real ground was gained and a hard boundary was
+reached; both are recorded here because the boundary is the useful part.
+
+### The analysis cluster is the encoder front end
+
+`docs/FINDINGS.md` in the reverse-engineering project notes that the
+FFT-windowing pipeline is called only from `Vocoder_RxTask` and never from
+`Vocoder_TxTask`, which reads as though it belongs to the receive path. It does
+not. `Vocoder_ProcessFrame` `0x00016E04` takes a PCM pointer, scales it through
+`Vocoder_ScaleSamplesForAnalysis` `0x00018BCC`, shifts a three-deep rolling
+window of 258 samples, windows it into an FFT, and runs a spectral analysis and
+a candidate search over the result. A decoder has no use for a rolling window of
+input samples. The "Rx" in `Vocoder_RxTask` is about receiving *audio*.
+
+The call graph is genuinely split across the two tasks — `Vocoder_SynthesizeFrame`
+`0x00019DB8`, which is decode, hangs off `Vocoder_TxTask` — so the task names
+carry no reliable direction information either way. The code does.
+
+### What was transcribed
+
+The analysis window and its geometry. `Vocoder_ProcessFrame` hands
+`Dsp_WindowAndComputeFft` `0x00019B6C` a table from its literal pool at
+`0x00016F38`, which reads SRAM `0x180010A8` (file `0x064768`), with
+`nInLen = 199` and a 256-point transform. The stock code stores half the window
+and folds it symmetrically, so the table is 100 entries. Scaled by its own peak
+of 29883 it reproduces `0.54 − 0.46·cos(2πi/198)` at every one of those 100
+points to within one count: a **199-point Hamming window**.
+
+It is extracted by `tools/extract_tables.py`, asserted against the Hamming
+definition in `tests/test_tables.c`, and used by `ambe_analysis.c` — 199 windowed
+samples zero-padded to 256, which is the radio's arrangement, in place of the
+256-point window this code generated for itself. The measured effect on
+`test_encode_pcm` is that the analyser's level accuracy improves from ×0.93 to
+**×0.99**, with pitch unchanged at 173/191 within four quantiser steps.
+
+### Where it stops, and why
+
+**The FFT's inner kernels do not decompile.** `Dsp_FftStageButterfly`
+`0x00025160` and `Dsp_FftFinalStageButterfly` `0x0002509C` both return
+`halt_baddata()` at the first instruction, and Ghidra's function bounds for them
+are wrong — the listing stops mid-function at `0x000251A2`, immediately after an
+`lrw r6,0x25220` that loads what is almost certainly the twiddle pointer.
+Disassembly works where decompilation does not, so this is recoverable, but it
+means hand-translating the two kernels from raw C-SKY and repairing the bounds
+first. Everything above them in the transform —
+`Dsp_FftBitReverseScale` `0x00025224`, `Dsp_FftButterflyStage` `0x00025520`,
+`Dsp_FftForward` `0x000256D0`, `Dsp_NormalizeArray` `0x0001ADA0`,
+`Dsp_ComputeMagnitudeSquared` `0x0001AB38` — decompiles cleanly.
+
+**The decision layer is coupled to the transform's data layout.** The pitch and
+voicing search reads an int32 array that `Vocoder_UpdateEnergyAndHistory`
+`0x000217CC` writes into the same context region the rolling window occupies.
+Transcribing the search while feeding it a differently-scaled spectrum of our
+own would produce something that reads like the radio's algorithm and is not
+one. That is the failure mode this project's rules exist to prevent.
+
+**And one name in the ledger looks wrong.** `Vocoder_SelectVoicingCandidate`
+`0x000177F0` carries a MEDIUM-confidence name, and the evidence says it selects
+a *pitch* candidate rather than a voicing decision. Its helper
+`Dsp_FindMaxEnergyBlockIndex` `0x000177B0` sums five consecutive int32 at four
+candidate offsets taken from tables at SRAM `0x1800140C` and `0x1800141C`, whose
+first four entries are
+
+```
+0x1800140C:  20  23  25  28      and then  19808 21889 24199 26755
+0x1800141C:  37  41  45  50                 9929 11005 12182 13433
+0x1800142C:  17  19  22  24                17234 19030 21242 23421
+```
+
+Those offsets are pitch lags, in bands roughly an octave apart, and the second
+half of each row is a per-lag weight that runs proportional to the lag. The
+function returns values like `0x13` (19) and `0x3A` (58) — lags again — into a
+slot that behaves as a previous-pitch memory. So this is a two-band pitch
+candidate search with an octave decision: structurally the same job as the
+octave guard in `ambe_analysis.c`, done properly.
+
+Naming it correctly is a prerequisite for transcribing it, and that belongs in
+the reverse-engineering project's ledger as a `CORRECTION` row, not here.
+
+### What moving the boundary takes
+
+In order, each independently verifiable:
+
+1. Repair the function bounds on `0x00025160` and `0x0002509C` in Ghidra and
+   hand-translate the two butterfly kernels from disassembly (26 instructions
+   each before the truncation point).
+2. Extract the FFT's bit-reversal permutation tables (SRAM `0x180014E0` for
+   size 32, `0x18001514` otherwise) and the twiddle table behind `0x00025220`.
+3. Transcribe the transform and check it against a reference DFT, the way
+   `tests/test_basop.c` checks the primitives.
+4. Settle the role of `Vocoder_SelectVoicingCandidate` and transcribe
+   `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, decompiles clean),
+   which produces the array it searches.
+5. Then the pitch and voicing decisions, and `Vocoder_AnalyzeSpectrum`
+   `0x000205B8` — whose own callee `Vocoder_NormalizeSpectralArrays`
+   `0x0002A70C` truncates at 28 lines and needs the same bounds repair.
+
+Step 3 is where a wrong transcription would first become visible, which is why
+it comes before anything that consumes the spectrum.
+
 ## Still open
 
-The analyser is **converted, not transcribed**. `src/ambe_analysis.c` is the
-same conventional MBE estimator it always was, with its arithmetic moved to
-integers, which is what makes the library float-free. Transcribing the radio's
-own multi-candidate search remains open, and the targets are known:
-
-| function | address | decompiles |
-|---|---|---|
-| `Dsp_WindowAndComputeFft` | `0x00019B6C` | 69 lines, clean |
-| `Vocoder_SelectVoicingCandidate` | `0x000177F0` | 384 lines, clean |
-| `Vocoder_RefinePitchEstimate` | `0x00025A60` | 385 lines, 3 warnings |
-| `Vocoder_AnalyzeSpectrum` | `0x000205B8` | 393 lines, 10 warnings |
-| `Vocoder_NormalizeSpectralArrays` | `0x0002A70C` | **truncates at 28 lines** |
-
-The last one does not decompile and would need reading as disassembly. That
-work would change what the encoder produces, not how accurately it produces it,
-so it is a separate question from this one.
+Beyond the analyser: nothing. Every table the decoder reads and every
+transcendental it evaluates now comes out of the firmware image.
 
 ## Reproducing
 

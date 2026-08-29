@@ -136,6 +136,31 @@ int main(void)
     }
 
     /*
+     * The analyser's window, SRAM 0x180010A8.  Half of a 199-point Hamming,
+     * folded symmetrically by Dsp_WindowAndComputeFft 0x00019B6C.  Checking it
+     * against the Hamming definition is what identifies it - the values alone
+     * would only say "a smooth taper".
+     */
+    {
+        int worst = 0;
+        for (i = 0; i < 100; i++) {
+            double h = 0.54 - 0.46 * cos(2.0 * M_PI * (double)i /
+                                         (double)(AMBE_ANWIN_N - 1));
+            int want = (int)(h * (double)AMBE_ANWIN_PEAK + 0.5);
+            int d = ambe_anwin_q15[i] - want;
+            if (d < 0) d = -d;
+            if (d > worst) worst = d;
+            CHECK(d <= 1, "anwin[%d] = %d, Hamming gives %d\n",
+                  i, ambe_anwin_q15[i], want);
+        }
+        /* symmetric about the centre tap, which must be the peak */
+        CHECK(ambe_anwin_q15[99] == AMBE_ANWIN_PEAK,
+              "anwin centre %d is not the recorded peak %d\n",
+              ambe_anwin_q15[99], AMBE_ANWIN_PEAK);
+        printf("\n    anwin     100 values, 199-pt Hamming, worst %d LSB", worst);
+    }
+
+    /*
      * The pitch and harmonic count are not tables at all: the firmware computes
      * them, and ambe_pitch_from_b0 evaluates its law with its constants.  This
      * checks that law against mbelib's tabulated approximation of the same
