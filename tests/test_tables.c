@@ -136,6 +136,53 @@ int main(void)
     }
 
     /*
+     * The FFT's twiddles and its two bit-reversal permutations.  Like the
+     * cosine table, these are identified by what they reproduce rather than
+     * by where they sit: the twiddles must be exp(-j*2*pi*k/512), and the
+     * permutation tables must decode to the bit-reversal of their size.
+     */
+    {
+        int worst = 0;
+        for (i = 0; i < 256; i++) {
+            double th = 2.0 * M_PI * (double)i / 512.0;
+            int wr = (int)floor(32767.0 * cos(th) + 0.5);
+            int wi = (int)floor(-32767.0 * sin(th) + 0.5);
+            int dr = ambe_fft_twiddle_q15[2*i] - wr;
+            int di = ambe_fft_twiddle_q15[2*i+1] - wi;
+            if (dr < 0) dr = -dr;
+            if (di < 0) di = -di;
+            if (dr > worst) worst = dr;
+            if (di > worst) worst = di;
+            CHECK(dr <= 1 && di <= 1, "twiddle[%d] = (%d,%d), want (%d,%d)\n",
+                  i, ambe_fft_twiddle_q15[2*i], ambe_fft_twiddle_q15[2*i+1], wr, wi);
+        }
+        printf("\n    twiddle   256 pairs, exp(-j2pi k/512), worst %d LSB", worst);
+    }
+    {
+        /* delta-coded swap pairs -> the bit-reversal permutation */
+        const short *tab[2];
+        int bits[2], t;
+        tab[0] = ambe_fft_bitrev32;  bits[0] = 5;
+        tab[1] = ambe_fft_bitrev128; bits[1] = 7;
+        for (t = 0; t < 2; t++) {
+            int n = tab[t][0], a = 0, b = 0, k, good = 0;
+            for (k = 0; k < n; k++) {
+                int lo, hi, rev, x;
+                a += tab[t][1 + 2*k] * 2;
+                b += tab[t][2 + 2*k] * 2;
+                lo = a / 4; hi = b / 4;
+                /* bit-reverse lo over bits[t] bits and require it to be hi */
+                rev = 0; x = lo;
+                for (i = 0; i < bits[t]; i++) { rev = (rev << 1) | (x & 1); x >>= 1; }
+                if (rev == hi) good++;
+                CHECK(rev == hi, "bitrev%d pair %d: %d <-> %d, reverse is %d\n",
+                      1 << bits[t], k, lo, hi, rev);
+            }
+            printf("\n    bitrev%-3d %d pairs, %d exact", 1 << bits[t], n, good);
+        }
+    }
+
+    /*
      * The analyser's window, SRAM 0x180010A8.  Half of a 199-point Hamming,
      * folded symmetrically by Dsp_WindowAndComputeFft 0x00019B6C.  Checking it
      * against the Hamming definition is what identifies it - the values alone

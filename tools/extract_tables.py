@@ -69,6 +69,29 @@ the normalisation shift.  The 512-entry table is a *cosine* table despite the
 g_awSineTable512 name it carries in the reverse-engineering ledger: it matches
 32767*cos(2*pi*i/512) to within one LSB at every one of its 512 points.
 
+THE FFT'S TABLES
+----------------
+Dsp_WindowAndComputeFft 0x00019B6C windows 199 samples into a 2^8 transform,
+which Dsp_FftForward 0x000256D0 runs as a 128-point *complex* FFT over the 256
+real samples packed as even/odd into re/im.  Its three tables:
+
+    0x18001A30  file 0x0650F0  256 complex pairs, exp(-j*2*pi*k/512) in Q15,
+                               reached from Dsp_FftStageButterfly's pool at
+                               0x00025220.  Matches cos and -sin to 1 LSB.
+    0x180014E0  file 0x064BA0  the N=32 bit-reversal permutation
+    0x18001514  file 0x064BD4  the N=128 bit-reversal permutation
+
+The two permutation tables are a count followed by delta-coded swap pairs: the
+stock code walks two pointers, advancing each by the next delta (in halfwords)
+and swapping the 32-bit words they land on.  Decoded that way they reproduce
+the bit-reversal permutation exactly - 12 pairs for N=32, 56 for N=128 - which
+is what identifies them.
+
+Both butterfly kernels and the permutation are only readable at all because of
+docs/patches/csky-muls-family.patch: the processor module was missing the two
+multiply families they are built from, and Ghidra truncates a function at the
+first instruction it cannot decode.
+
 THE ANALYSIS WINDOW
 -------------------
 Vocoder_ProcessFrame 0x00016E04 - the speech analyser's per-frame entry point,
@@ -116,6 +139,14 @@ MATH_TABLES = [
      "Math_Sqrt 0x00019364 / Math_SqrtScaled 0x000193E0, two sets of 6"),
     ("ambe_cos512_q15",     0x18001630, 512,   8,
      "Math_TableInterpLookup 0x00019000, cos(2*pi*i/512)"),
+    ("ambe_fft_twiddle_q15", 0x18001a30, 512,  8,
+     "Dsp_FftStageButterfly 0x00025160 via its pool at 0x00025220; "
+     "256 complex pairs of exp(-j*2*pi*k/512), Q15, re then im"),
+    ("ambe_fft_bitrev32",   0x180014e0, 25,    8,
+     "Dsp_FftBitReverseScale 0x00025224 pool 0x00025480; count then "
+     "delta-coded swap pairs, the N=32 bit-reversal permutation"),
+    ("ambe_fft_bitrev128",  0x18001514, 113,   8,
+     "Dsp_FftBitReverseScale 0x00025224 pool 0x000253D8; likewise for N=128"),
     ("ambe_anwin_q15",      0x180010a8, 100,   8,
      "Dsp_WindowAndComputeFft 0x00019B6C via Vocoder_ProcessFrame 0x00016E04's "
      "pool at 0x00016F38; half of a 199-point Hamming window"),

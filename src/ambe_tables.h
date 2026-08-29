@@ -55,6 +55,20 @@ extern const short ambe_cos512_q15[512];     /* Math_TableInterpLookup   */
  * transform.  Only half is stored; the stock code folds it symmetrically.
  * It is a Hamming window (tests/test_tables.c asserts that), peak 29883.
  */
+/*
+ * The FFT's tables, all reached from Dsp_FftStageButterfly 0x00025160 and
+ * Dsp_FftBitReverseScale 0x00025224.  The transform is a 128-point complex
+ * FFT over 256 real samples packed even/odd into re/im.
+ *
+ * The permutation tables are a count followed by delta-coded swap pairs: two
+ * pointers walk forward by successive deltas (in halfwords) and the 32-bit
+ * words they land on are exchanged.  Decoded that way they are exactly the
+ * bit-reversal permutation, which is what identifies them.
+ */
+extern const short ambe_fft_twiddle_q15[512];  /* 256 x exp(-j*2*pi*k/512) */
+extern const short ambe_fft_bitrev32[25];      /* N = 32                   */
+extern const short ambe_fft_bitrev128[113];    /* N = 128                  */
+
 #define AMBE_ANWIN_N    199   /* the window's full length          */
 #define AMBE_ANWIN_PEAK 29883 /* its centre tap, the table's scale  */
 extern const short ambe_anwin_q15[100];
