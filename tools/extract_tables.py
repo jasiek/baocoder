@@ -104,6 +104,66 @@ table is 100 entries for a 199-point window.  It is a Hamming window: scaled by
 its own peak, 29883, it reproduces 0.54 - 0.46*cos(2*pi*i/198) at all 100
 points to within a count.  tests/test_tables.c asserts that.
 
+THE SUB-BAND FILTERBANK'S TABLES
+--------------------------------
+Vocoder_AnalyzeSpectrum 0x000205B8 runs two filterbanks, and both their tables
+sit in the same contiguous SRAM block, 0x18001454..0x180014BD:
+
+    0x18001454  file 0x064B14  16 x int16, half of a symmetric 32-tap window
+    0x18001474  file 0x064B34   8 x int16, a 7-tap symmetric FIR plus a pad
+    0x18001484  file 0x064B44  29 x int16, half of a 58-tap window
+
+The first two belong to Vocoder_AnalyzeSubbandSpectrum 0x00023AA8, which is a
+16-channel analysis filterbank.  It reads the 32-tap window through two
+pointers into the same table (0x000240A8 and 0x00024920, both 0x18001454) and
+applies it folded - sample j takes tap j and sample 31-j takes it again - then
+hands the 32 windowed samples to Vocoder_SubbandSumDifference.  The window is
+not analytic: the best raised-cosine fit leaves 1309 LSB against a peak of
+30913.  What identifies it is its sum, 524290, which is 2**19 + 2 - a DC gain
+of exactly 16 in Q15, one per output channel.
+
+The 7-tap FIR is read at 0x00024EAA and applied with a stride of 16 shorts, so
+it runs down one channel of the 16 interleaved ones and emits 11 new samples
+per channel per frame.  Its taps are [-4456, 3034, 19608, 29164, 19608, 3034,
+-4456] and they sum to 65536 exactly, which is unity for the >> 16 the code
+applies - that is what identifies it, and the trailing zero is padding to a
+word boundary.
+
+The third belongs to the eight-band loop in Vocoder_AnalyzeSpectrum itself,
+which reaches it through 0x00020B3C holding 0x180014BC and walks *downwards* to
+0x18001482 (held at 0x00020B38), i.e. 29 entries applied symmetrically to a
+58-sample sub-frame, stored edge-first.  Because nothing points at the table's
+own start address, a byte search for it finds nothing.  It is not a Hamming
+window despite an edge/peak ratio of 0.0807: the best raised-cosine fit is
+M = 57, w = 0.5457 - 0.4543*cos(2*pi*n/57), and it leaves 360 LSB.
+
+THE 32-POINT REAL DFT
+---------------------
+Vocoder_SubbandSumDifference is not an FFT.  It folds the 32 windowed samples
+into 15 half-sums and 15 half-differences, then multiplies them by a stored
+matrix at 0x180039EC (file 0x0670AC, 480 x int16, bounded above by 0x18003DAC
+which the loop tests against): 15 rows of 16 cosines followed by 16 sines.  Bin
+0 is the plain sum, written before the loop with a zero imaginary part.
+
+The matrix is round(32768*cos(2*pi*k*j/32)) and -round(32768*sin(2*pi*k*j/32))
+for k = 1..15 and j = 1..16, saturated to +-32767, and it matches to 1 LSB at
+every one of its 480 entries.  So the sub-band stage's transform is a 32-point
+real DFT evaluated directly, giving bins 0..15 - one per channel.
+
+THE PITCH WINDOW
+----------------
+Vocoder_AnalyzeSpectrum also transforms 255 samples before pitch and voicing,
+through PTR_DAT_00020E5C = 0x18000FA8 (file 0x064668).  Those 128 shorts sit
+immediately before the 199-point Hamming at 0x180010A8, so the two are
+contiguous the way the math primitives' block was.  It is monotone edge to
+centre, peak 28193, but a 3-term least-squares fit leaves about 1000 LSB
+against Hamming, Hann and Blackman alike, and there is an unexplained rate
+break between entries 5 and 6.  It is extracted as measured rather than named.
+
+All five of these tables are verbatim bytes, which is what this project does
+with every table anyway; the analytic identifications above are checks on the
+extraction, not the source of the values.
+
 The block-length table is one uint16 per L (L = 9..56), holding four 4-bit
 fields, least significant first, each biased by +2:
 
@@ -150,6 +210,22 @@ MATH_TABLES = [
     ("ambe_anwin_q15",      0x180010a8, 100,   8,
      "Dsp_WindowAndComputeFft 0x00019B6C via Vocoder_ProcessFrame 0x00016E04's "
      "pool at 0x00016F38; half of a 199-point Hamming window"),
+    ("ambe_pitchwin_q15",   0x18000fa8, 128,   8,
+     "Vocoder_AnalyzeSpectrum 0x000205B8 via PTR_DAT_00020E5C; half of the "
+     "255-point window it transforms before pitch and voicing.  Not a "
+     "cosine-family window - recorded as measured"),
+    ("ambe_subband_win_q15", 0x18001454, 16,   8,
+     "Vocoder_AnalyzeSubbandSpectrum 0x00023AA8 via PTR 0x000240A8/0x00024920; "
+     "half of the symmetric 32-tap window of the 16-channel filterbank"),
+    ("ambe_subband_fir_q15", 0x18001474, 8,    8,
+     "Vocoder_AnalyzeSubbandSpectrum's decimator, read at 0x00024EAA via PTR "
+     "0x00025084; taps 0..3 mirrored to a symmetric 7, then one pad word"),
+    ("ambe_subwin_q15",      0x18001484, 29,   8,
+     "Vocoder_AnalyzeSpectrum's eight-band loop via PTR 0x00020B3C, walked "
+     "downwards from 0x180014BC; half of the 58-tap sub-frame window"),
+    ("ambe_subband_dft_q15", 0x180039ec, 480,  8,
+     "Vocoder_SubbandSumDifference via PTR 0x0002B2D4; 15 rows of 16 cosines "
+     "then 16 negated sines, the 32-point real DFT's bins 1..15"),
 ]
 
 LMPRBL_SRAM = 0x18002030

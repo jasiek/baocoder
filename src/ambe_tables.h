@@ -73,4 +73,54 @@ extern const short ambe_fft_bitrev128[113];    /* N = 128                  */
 #define AMBE_ANWIN_PEAK 29883 /* its centre tap, the table's scale  */
 extern const short ambe_anwin_q15[100];
 
+/*
+ * The two filterbanks in Vocoder_AnalyzeSpectrum 0x000205B8, and the window it
+ * transforms before pitch and voicing.  All four tables below are verbatim
+ * bytes; see tools/extract_tables.py for how each was located, and
+ * docs/fixed-point.md for what the stage does with them.
+ *
+ * 0x18001454..0x180014BD is contiguous and holds the first three.
+ */
+
+/* Half of the 255-point window, SRAM 0x18000FA8, contiguous with the Hamming
+   above.  Not a cosine-family window: extracted as measured, not named. */
+#define AMBE_PITCHWIN_N    255
+#define AMBE_PITCHWIN_PEAK 28193
+extern const short ambe_pitchwin_q15[128];
+
+/*
+ * Vocoder_AnalyzeSubbandSpectrum 0x00023AA8, the 16-channel filterbank.
+ * The window is folded - sample j and sample 31-j share tap j - and its taps
+ * sum to 2**19 + 2, a DC gain of 16 in Q15, one per output channel.
+ */
+#define AMBE_SUBBAND_CHANNELS 16
+#define AMBE_SUBBAND_WIN_N    32
+extern const short ambe_subband_win_q15[16];
+
+/*
+ * Its decimator, applied with a stride of 16 shorts so it runs down one of the
+ * 16 interleaved channels.  Taps 0..3 mirror to a symmetric 7; they sum to
+ * 65536, which is unity for the >> 16 that follows.  [7] is padding.
+ */
+extern const short ambe_subband_fir_q15[8];
+
+/*
+ * The 32-point real DFT that Vocoder_SubbandSumDifference evaluates directly
+ * rather than by an FFT: 15 rows, each 16 cosines then 16 negated sines, for
+ * bins 1..15.  Bin 0 is the plain sum.  Row k, column j (both 1-based) is
+ * round(32768*cos(2*pi*k*j/32)) saturated to +-32767, and the sine half is the
+ * negation of the same with sin; tests/test_tables.c asserts both to 1 LSB.
+ */
+extern const short ambe_subband_dft_q15[480];
+
+/*
+ * The eight-band loop's sub-frame window, reached only through its far end
+ * (0x180014BC) and walked downwards, so the table is stored edge-first and
+ * nothing points at 0x18001484 itself.  29 half-taps for a 58-sample segment.
+ * Not a Hamming: the best raised-cosine fit leaves 360 LSB.
+ */
+#define AMBE_SUBWIN_N    58
+#define AMBE_SUBWIN_PEAK 32746
+extern const short ambe_subwin_q15[29];
+
 #endif

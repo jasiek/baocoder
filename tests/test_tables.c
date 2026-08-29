@@ -208,6 +208,103 @@ int main(void)
     }
 
     /*
+     * The sub-band stage's tables, SRAM 0x18001454..0x180014BD and 0x180039EC.
+     * None of the three windows is analytic, so what is asserted for them is
+     * the structural property each one has to have for the code that reads it
+     * to make sense.  The DFT matrix *is* analytic, and that is the strong
+     * check in this block: 480 entries, every one within 1 LSB of a cosine or
+     * a negated sine, which is what says the sub-band transform is a 32-point
+     * real DFT rather than something merely transform-shaped.
+     */
+    {
+        int worst = 0, sum = 0, k;
+
+        /* The 32-point real DFT, bins 1..15: 16 cosines then 16 sines per row,
+           saturated to +-32767 where the true value is +-1. */
+        for (k = 1; k <= 15; k++) {
+            for (i = 1; i <= 16; i++) {
+                double th = 2.0 * M_PI * (double)k * (double)i / 32.0;
+                int wc = (int)floor(32768.0 * cos(th) + 0.5);
+                int ws = (int)floor(-32768.0 * sin(th) + 0.5);
+                int gc, gs, d;
+                if (wc >  32767) wc =  32767;
+                if (wc < -32767) wc = -32767;
+                if (ws >  32767) ws =  32767;
+                if (ws < -32767) ws = -32767;
+                gc = ambe_subband_dft_q15[(k - 1) * 32 + (i - 1)];
+                gs = ambe_subband_dft_q15[(k - 1) * 32 + 16 + (i - 1)];
+                d = gc - wc; if (d < 0) d = -d;
+                if (d > worst) worst = d;
+                CHECK(d <= 1, "dft cos[%d][%d] = %d, want %d\n", k, i, gc, wc);
+                d = gs - ws; if (d < 0) d = -d;
+                if (d > worst) worst = d;
+                CHECK(d <= 1, "dft sin[%d][%d] = %d, want %d\n", k, i, gs, ws);
+            }
+        }
+        printf("\n    dft       480 values, 32-pt real DFT, worst %d LSB", worst);
+
+        /*
+         * The decimator: symmetric, and unity gain for the >> 16 that follows
+         * it.  Both are exact, and the sum is what identifies the table.
+         */
+        CHECK(ambe_subband_fir_q15[7] == 0,
+              "fir pad word is %d, not 0\n", ambe_subband_fir_q15[7]);
+        sum = ambe_subband_fir_q15[3];
+        for (i = 0; i < 3; i++)
+            sum += 2 * ambe_subband_fir_q15[i];
+        CHECK(sum == 65536, "fir taps sum to %d, not 65536\n", sum);
+        printf("\n    fir       7 symmetric taps summing to %d", sum);
+
+        /*
+         * The filterbank window is folded over 32 samples, so its DC gain is
+         * twice the stored half's sum: 2**19 + 2, one unit of gain per output
+         * channel.  It must also rise monotonically to the peak, since the
+         * fold makes the two centre samples share the last tap.
+         */
+        sum = 0;
+        for (i = 0; i < 16; i++) {
+            sum += ambe_subband_win_q15[i];
+            if (i)
+                CHECK(ambe_subband_win_q15[i] > ambe_subband_win_q15[i - 1],
+                      "subband_win[%d] = %d does not rise\n",
+                      i, ambe_subband_win_q15[i]);
+        }
+        CHECK(2 * sum == (1 << 19) + 2,
+              "subband window sums to %d, not 2**19 + 2\n", 2 * sum);
+        printf("\n    sbwin     16 half-taps, 32-tap gain %d = 2**19 + 2",
+               2 * sum);
+
+        /*
+         * The 58-tap sub-frame window is stored edge-first, because the code
+         * walks it downwards from its far end.  So the *last* entry is the
+         * peak here, where anwin's centre tap is its last too but for the
+         * opposite reason.
+         */
+        CHECK(ambe_subwin_q15[28] == AMBE_SUBWIN_PEAK,
+              "subwin peak %d is not the recorded %d\n",
+              ambe_subwin_q15[28], AMBE_SUBWIN_PEAK);
+        for (i = 1; i < 29; i++)
+            CHECK(ambe_subwin_q15[i] > ambe_subwin_q15[i - 1],
+                  "subwin[%d] = %d does not rise\n", i, ambe_subwin_q15[i]);
+        printf("\n    subwin    29 half-taps edge-first, peak %d",
+               ambe_subwin_q15[28]);
+
+        /*
+         * The pitch window is contiguous with the Hamming - it ends exactly
+         * where anwin begins - and is monotone to its peak.  It is not named,
+         * so there is nothing stronger to assert than that.
+         */
+        CHECK(ambe_pitchwin_q15[127] == AMBE_PITCHWIN_PEAK,
+              "pitchwin peak %d is not the recorded %d\n",
+              ambe_pitchwin_q15[127], AMBE_PITCHWIN_PEAK);
+        for (i = 1; i < 128; i++)
+            CHECK(ambe_pitchwin_q15[i] > ambe_pitchwin_q15[i - 1],
+                  "pitchwin[%d] = %d does not rise\n", i, ambe_pitchwin_q15[i]);
+        printf("\n    pitchwin  128 half-taps, peak %d, unnamed",
+               ambe_pitchwin_q15[127]);
+    }
+
+    /*
      * The pitch and harmonic count are not tables at all: the firmware computes
      * them, and ambe_pitch_from_b0 evaluates its law with its constants.  This
      * checks that law against mbelib's tabulated approximation of the same
