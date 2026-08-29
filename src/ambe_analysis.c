@@ -12,11 +12,12 @@
  * under a task named Vocoder_RxTask, which is about receiving audio, not RF -
  * Vocoder_TxTask calls none of it.
  *
- * What is transcribed here is the window and its geometry: the table below is
- * the radio's, and the 199-into-256 arrangement is the radio's.  What is not
- * is the transform (the FFT's two butterfly kernels do not decompile) or the
- * pitch and voicing decisions that consume it.  So the estimator around the
- * window is still ours - a conventional MBE analyser producing the same
+ * The whole spectral front end here is the radio's: the window table below is
+ * the radio's, the 199-into-256 arrangement is the radio's, and the transform
+ * is the radio's (ambe_fft.c, transcribed once the two butterfly kernels were
+ * made to decompile).  What is *not* transcribed is the pitch and voicing
+ * decisions that consume the spectrum.  So the estimator on top of the
+ * transform is still ours - a conventional MBE analyser producing the same
  * parameter set - and the quantiser it feeds (ambe_encode_params.c) is the
  * firmware's.  docs/fixed-point.md records exactly where the boundary is and
  * what moving it would take.

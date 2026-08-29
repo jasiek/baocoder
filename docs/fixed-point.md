@@ -404,17 +404,67 @@ does not recover — the argument is left in a register — and both candidate
 counts leave that one bin several dB wrong against the reference. It is written
 from the identity instead.
 
+### The pitch decision, read
+
+`0x000177F0` is settled: it selects a pitch candidate, not a voicing decision,
+and is renamed `Vocoder_SelectPitchCandidate`. Its tables are now read rather
+than described.
+
+Four pointer pairs in its literal pool land in one contiguous SRAM block. The
+pairing is the part that is easy to get wrong — **a row's weights are the four
+shorts immediately before its offsets, not after**:
+
+| offsets at | offsets | weights at | weights |
+|---|---|---|---|
+| `0x1800140C` | 20, 23, 25, 28 | `0x18001404` | 11420, 12616, 13959, 15417 |
+| `0x1800141C` | 37, 41, 45, 50 | `0x18001414` | 19808, 21889, 24199, 26755 |
+| `0x1800142C` | 17, 19, 22, 24 | `0x18001424` | 9929, 11005, 12182, 13433 |
+| `0x1800143C` | 32, 35, 39, 44 | `0x18001434` | 17234, 19030, 21242, 23421 |
+
+An offset is the base of a five-tap window — `Dsp_FindMaxEnergyBlockIndex`
+`0x000177B0` sums five consecutive int32 at each of a row's four offsets and
+keeps the largest. What the weights are is forced by
+`Vocoder_CandidateEnergyPassesThreshold` `0x00017670`, which builds the first
+moment `M = 2·Σ k·block[k]` over that window and tests
+
+```
+| 2·E·off + M − T |  <  (thresh · T) >> 20,    T = (2·W·E) >> 9
+```
+
+Dividing by `2E` collapses it to `| off + centroid − W/512 | < (thresh/2^20)·(W/512)`.
+So `W` is the **nominal position in the energy array in Q9**, and the rule is a
+*relative* one: accept the candidate when its window's energy centroid sits
+within a fixed percentage of where that candidate says the pitch should be.
+
+Two checks decide the reading rather than merely fitting it. All sixteen
+`W/512` land inside their own window `[off, off+4]`, each within ±0.5 of its
+centre — a weight meaning anything else would not centre on the window it is
+indexed with. And the two thresholds come out exactly round: `0x51EC`/2^20 =
+**2.00005 %**, `0x4189`/2^20 = **1.59998 %**.
+
+The octave structure is then visible in the positions rather than assumed —
+within a row they are geometric with ratio 1.1053, and the `0x1800141C` row is
+1.9954× the `0x1800142C` row. A pair is accepted only when both halves pass.
+
 ### What remains
 
-The decisions on top of the spectrum:
-
-1. Settle the role of `Vocoder_SelectVoicingCandidate` `0x000177F0` — the
-   evidence says pitch, not voicing — and transcribe
-   `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean), which
-   builds the array it searches.
+1. `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean), which
+   builds the array those offsets index. The consumer bounds it: the tail of
+   `0x000177F0` searches `pEnergyArray + 0x14` for `0x76` entries and adds 5,
+   so the array is 128 int32 searched over indices **5..122**, with the caller
+   `FUN_0001732C` testing the result against `0x13` = 19 and `0x3A` = 58.
+   Until that function is read, what the index *means* is inference, not
+   evidence — the candidate range 19..58 at 8 kHz would be 421..138 Hz if it is
+   a period in samples, which fits speech pitch and fits nothing else tried,
+   but it has not been shown.
 2. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, now 746 lines and clean.
    Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C` still truncates at
    28 lines — a different blocker from the one that has been fixed.
+
+One trap, recorded because it cost the most time: these tables are nonsense
+against `DM32UV_L01_048.bin`. The SRAM image that `BASE = 0x0636C0` maps is the
+one in `DM32_L01_048_20250821.bin`, which is what `tools/extract_tables.py`
+reads. Same mapping, different file.
 
 ## Still open
 
