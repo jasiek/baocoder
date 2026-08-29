@@ -614,6 +614,50 @@ lines, no `halt_baddata`). Both are readable now; neither is small. Until that
 lands, the voicing decision here stays the guessed one, and
 `tests/test_encode_voicing.c` keeps printing what it is worth.
 
+### The filterbank, mapped
+
+The band-construction loop in `Vocoder_AnalyzeSpectrum` is what stands between
+this library and the firmware's voicing rule. It is now mapped, which is the
+transcription spec even though the C is not written:
+
+**Eight bands, 50 % overlap-add.** The outer loop runs 0..7 advancing the write
+pointer by **16 int32** while each band *writes* **32 int32**, and the write is
+an exponent-aligned add, not a store:
+
+```
+*(int *)(puVar14 + i) = (*(int *)(puVar20 + i) >> shift) + *(int *)(puVar13 + i)
+```
+
+`8 × 16 = 128` is exactly the `local_6e4[128]` the voicing rule reads; the
+eighth band's tail runs into the adjacent scratch buffer, which the code then
+uses deliberately.
+
+**Two sub-frames per band**, combined the same way. Each is a **58-sample**
+segment (`0x3A`), windowed by a folded 58-tap table, zero-padded into a
+**64-point** transform (`Dsp_FftForward(…, 6, 0)`), then `|X|² × 2` over
+**32 bins** with bins 0 and 1 zeroed. Per-band block-float exponents go to
+`asStack_40[8]` — `Vocoder_SelectSpectralSubbands`'s fourth argument.
+
+Input strides: per sub-frame 49 and 11 samples; per band 22 and 98.
+
+**A third window table**, at SRAM `0x18001484..0x180014BC` (file `0x064B44`):
+29 half-taps applied symmetrically, matching the 58-sample segment. Its
+edge/peak ratio is 0.0807 against a Hamming's 0.08 — but it is **not** a
+Hamming. The best raised-cosine fit is `M = 57`,
+`w = 0.5457 − 0.4543·cos(2πn/57)`, worst residual **360 LSB** (1.1 %), against
+the **1 LSB** the 199-point window matches its Hamming to.
+
+So two of the analyser's three windows are non-analytic, and if they are
+transcribed it should be as verbatim bytes — which is what this project does
+with every table anyway, and why the Hamming identification was always a bonus
+check rather than the mechanism.
+
+**What is left to write** is the C for the loop above plus its exponent
+bookkeeping, and `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` (764 lines,
+readable) which runs ahead of it. The voicing rule then drops on top and
+`tests/test_encode_voicing.c` becomes a pass/fail check instead of a
+characterisation.
+
 ### A second analysis window
 
 `Vocoder_AnalyzeSpectrum` runs its own transform before pitch and voicing:
