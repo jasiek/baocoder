@@ -36,14 +36,17 @@ make tables   # re-extract the quantiser tables from the firmware image
 | 72-bit on-air frame ↔ 49-bit payload | `src/ambe_fec.c` | firmware `Vocoder_DescrambleVoiceFrame` `0x0001893C`, `Vocoder_DeinterleaveVoiceBits` `0x000230A4`, `Dsp_LcgSignScramble` `0x00021FE0` |
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
-| Quantiser codebooks, voicing patterns, block lengths | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
+| Fixed-point primitives (log2, pow2, sqrt, cos, divide) | `src/ambe_basop.c` | firmware `Math_Log2` `0x0001903C`, `Math_Pow2` `0x000191C0`, `Math_Sqrt` `0x00019364`, `Math_TableInterpLookup` `0x00019000`, `Math_SDiv` `0x00018D74` |
+| Quantiser codebooks, voicing patterns, block lengths, and the primitives' coefficients | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
 | Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |
 | DMRA voice privacy (ARC4, AES-128/256) | `src/rc4.c`, `src/aes.c` | needed only to decode the encrypted test captures |
 | Quantisation (params -> 49 bits) | `src/ambe_encode_params.c` | exact inverse of the decoder, searching the firmware's codebooks |
 | Analysis (PCM -> params) | `src/ambe_analysis.c` | **ours**, not the firmware's — see below |
+| Precision comparison against the float version | `tools/make_oracle.py`, `tools/compare_precision.py` | see `docs/fixed-point.md` |
 
-The public API is `include/ambe.h`. The library has no dependencies beyond
-`libm`; `tools/mbe_ref.c` links mbelib but is only used to regenerate fixtures
+The public API is `include/ambe.h`. The library has no dependencies at all — it
+is integer-only and does not link `libm`, which `make check-fixedpoint`
+asserts; `tools/mbe_ref.c` links mbelib but is only used to regenerate fixtures
 and is not part of the library build.
 
 ## The quantiser tables come out of the radio
@@ -130,17 +133,19 @@ A structural search backs this up: scanning the whole image as int16, int32 and
 float32 for a run of zeros followed by a smooth monotone ramp — the shape a
 stored trapezoid would have — finds no such structure anywhere, in any width.
 
-## Still not from the image
+## Nothing is left unresolved
 
-One table: the 120-entry pitch quantiser. `src/ambe_tables_unresolved.c` is the
-whole remaining provenance boundary, and `tools/gen_unresolved_tables.py`
-records what was searched — a per-offset least-squares scale fit with a half-LSB
-residual test across the whole image in int16 and int32, the same test that
-found every codebook, against `f0`, `w0`, `1/f0` and `log2 f0`. No candidate,
-and a pure log-linear law does not fit it either.
+An earlier version of this project carried one gap: the 120-entry pitch
+quantiser, which no search of the image could find. It was never a table. The
+firmware evaluates the quantiser — `Vocoder_DecodePitchIndex` `0x00022B78` turns
+b0 into log2 of the fundamental in Q12, `Vocoder_PitchFromLog2` `0x0002AD6C`
+raises 2 to it, and `Vocoder_HarmonicCountFromPitch` `0x0002AD18` divides
+`0x3B39C` by the result — so a search for stored values was looking for
+something that does not exist. All three are transcribed in `src/ambe_params.c`.
 
-The harmonic-count table is *not* a second gap: `floor(0.4627 / f0)` reproduces
-all 120 entries exactly, which `test_tables` asserts.
+The harmonic-count table was never a second gap either: `floor(0.4627 / f0)`
+reproduces all 120 entries exactly, which `test_tables` asserts, and `0x3B39C /
+2^19 = 0.462685` is that constant sitting in the firmware as an integer.
 
 The `f0` law is now evaluated with the firmware's own four-term Taylor
 polynomial for 2^x (`Vocoder_PitchFromLog2` `0x0002AD6C`) rather than with
@@ -229,14 +234,15 @@ independent implementations:
 |---|---|---|
 | `test_aes` | AES against the FIPS-197 Appendix B and C vectors, all three key lengths, plus the DMRA IV expansion | 92 checks |
 | `test_golay` | the Golay code's defining property, exhaustively: 2048 syndromes ↔ 2048 error patterns of weight ≤ 3, all corrected; minimum distance 7; systematic encoding | 30 720 checks |
-| `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 124 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` 2.4e-3 / `L` 119/120 |
+| `test_basop` | the firmware's log2, pow2, sqrt and cos swept across their **whole** input domains against libm, plus log2's coefficients against the Taylor series they turn out to be | 10 621 checks; cos 6.1e-5, log2 2.6e-3, pow2 1.2e-4, sqrt 1.3e-3 — the radio's accuracies, not this code's |
+| `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 123 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` **4.8e-5** / `L` **120/120** |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
-| `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 3.9e-4, γ 2.7e-4, Ml 5.0e-3; **0** L divergences |
+| `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 **3.1e-6**, γ 2.7e-4, Ml 5.1e-3; **0** L divergences |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
-| `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.965** across six captures |
+| `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.966** across six captures |
 | `test_encode` | decode 2 052 real frames from six captures to parameters, re-quantise, demand the radio's own bits back | **1 354/1 664** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
 | `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames |
-| `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **172/191**, **1** octave error, level ×0.91 |
+| `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **173/191**, **1** octave error, level ×0.93 |
 
 `test_params` is the load-bearing pipeline test. The AMBE spectral envelope is
 coded differentially against the previous frame, so one wrong bit position or
