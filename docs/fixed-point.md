@@ -570,6 +570,50 @@ current behaviour and prints the baseline beside it every run, so the gap is
 visible rather than buried. The fix is to transcribe
 `Vocoder_SelectSpectralSubbands`, not to move a number.
 
+### Why it does not port, and what porting it would take
+
+The obvious next step was to transcribe the firmware's rule. Tracing its inputs
+first turned up the reason the constant failed, and it is structural rather
+than numerical.
+
+**The array the rule reads is not the main transform.**
+`Vocoder_AnalyzeSpectrum`'s `local_6e4` is `uint[128]` — 512 bytes, read by the
+voicing code as **256 int16 in 8 bands of 32** (`pSpectrum += 0x40` per band,
+and `Dsp_SumSpectralBand`'s `nWidth = 0x40` yields 32 as its loop bound). It is
+filled by **eight 64-point sub-band FFTs** (`Dsp_FftForward(…, 6, 0)`) inside a
+nested loop that shifts per-band exponents from context state. The radio
+decides voicing on a sub-band filterbank; this library uses peak bins of one
+256-point spectrum. That is why 0.80 scored 35% here — a different spectral
+representation, not a different normalisation.
+
+**The pitch argument's format is pinned, and without needing
+`Vocoder_RefinePitchEstimate`** — the one function still truncated.
+`Dsp_SumSpectralBand` computes `iVar2 = (pitch << 16) >> (15 − nBand)`, so at
+`nBand = 6` the harmonic step is `pitch/512` in 16.16 bins. A harmonic step for
+a 256-point transform at 8 kHz is `f0_turns × 256`, so
+
+> `pitch = f0_turns × 2^17` — f0 in **Q17 turns/sample**, which is this
+> library's `f0` (Q19) shifted right by two.
+
+Three independent checks agree:
+
+* `nBand = 5` gives `pitch/1024`, exactly half the step — the octave
+  hypothesis, confirmed by arithmetic rather than by shape.
+* `sVar7 = pitch/1024 + 1` lands in **2..7** across the codec's whole f0 range
+  (0.0081–0.05 turns/sample), inside the 32-bin band with `0x20 − sVar7` always
+  positive.
+* The octave gate `0xCCD` becomes `3277/2^17 = 0.025000` turns/sample =
+  **exactly 200.0 Hz**. A round threshold in Hz, which no other Q format
+  produces.
+
+**So the job is bigger than the rule.** The rule itself is fully read and is
+the small part. What it needs underneath is the sub-band filterbank that fills
+`local_6e4`: `Vocoder_AnalyzeSpectrum` `0x000205B8`'s band-construction loop
+(747 lines, 0 warnings) and `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` (764
+lines, no `halt_baddata`). Both are readable now; neither is small. Until that
+lands, the voicing decision here stays the guessed one, and
+`tests/test_encode_voicing.c` keeps printing what it is worth.
+
 ### A second analysis window
 
 `Vocoder_AnalyzeSpectrum` runs its own transform before pitch and voicing:
