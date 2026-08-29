@@ -454,16 +454,50 @@ The useful part for this branch is negative: **`0x000177F0` is not part of the
 speech analyser and this library does not need it.** It runs on the analyser's
 spectrum only because that spectrum is already in the buffer.
 
+### Two more instructions, and where the analyser actually lives
+
+`Vocoder_AnalyzeSpectrum` `0x000205B8` is the speech analyser, and its callee
+list says so: `Vocoder_RefinePitchEstimate` `0x00025A60`,
+`Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8`,
+`Vocoder_SelectSpectralSubbands` `0x0002AA20` and `Math_Log2` — pitch,
+subbands, voicing, amplitudes. `Vocoder_UpdateEnergyAndHistory` `0x000217CC`
+calls four things, runs *after* the analysis, and is envelope and history
+state maintenance. It is not the way in.
+
+Reading those needed two more C-SKY instructions, both checked by result and
+both in the reverse-engineering project's `docs/patches/`:
+
+* **`mthi`/`mtlo`** — the write side of the HI/LO accumulator group, 44 sites.
+  Confirmed by `FUN_0001ACCC` disassembling to
+  `movi r5,0 / mthi r5 / mtlo r5 / <loop> / mfhi / mflo`: an accumulator clear
+  before a MAC loop, the mirror of the read that confirmed `muls`.
+* **`mulsa`** — the accumulating signed multiply, 56 sites, which that project
+  had deliberately refused for want of a checkable result. One exists:
+  `FUN_0001ACCC` uses it with a multiplier of 1, i.e. as a widening 64-bit add,
+  and the image already contained two MAC-free implementations of that same
+  sum — `Dsp_SumInt32Array` `0x00017634` and the inlined loop in
+  `Vocoder_UpdateEnergyAndHistory`. With `mulsa` as accumulate, `FUN_0001ACCC`
+  decompiles to exactly those, with zero warnings.
+
+`Vocoder_NormalizeSpectralArrays` `0x0002A70C`, recorded above as "a different
+blocker from the one that has been fixed", went 28 → 168 lines. The blocker was
+`mthi`/`mtlo`.
+
 ### What remains
 
-1. `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean). This one
-   is still the analyser's: it conditions the `|X|²` array in place, calls
-   `Vocoder_SmoothSpectralEnvelope`, maintains adaptive floor levels, and
-   shifts the three-deep history. It is what stands between the transcribed
-   transform and the parameters.
-2. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, now 746 lines and clean.
-   Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C` still truncates at
-   28 lines — a different blocker from the one that has been fixed.
+1. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` is now **764 lines with no
+   `halt_baddata`** — fully readable, and the first real target.
+2. `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, and
+   `Vocoder_SelectSpectralSubbands` `0x0002AA20` for the voicing decision.
+3. `Vocoder_RefinePitchEstimate` `0x00025A60` still has one 164-byte gap, at a
+   `0b100110`/`0b00100` encoding with the `mfhi`/`mflo` shape — probably
+   `mflos`, a *saturating* accumulator read. That one is left alone on purpose:
+   implementing it means inventing a saturation rule, and unlike the two above
+   there is nothing in the image to check the guess against.
+
+So the pitch estimator is still partly closed, but the subband analyser is
+open, and this library's own pitch search is the weakest thing in it
+(173/191 within four quantiser steps, one octave error).
 
 One trap, recorded because it cost the most time: these tables are nonsense
 against `DM32UV_L01_048.bin`. The SRAM image that `BASE = 0x0636C0` maps is the
