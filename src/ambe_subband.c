@@ -139,6 +139,46 @@ void ambe_subband_frame(int32_t energy[16], int16_t bins[32],
 }
 
 /*
+ * WHAT IS NOT HERE YET, and what is already known about it.
+ *
+ * Between the energy accumulation and the decimator the stock code turns each
+ * frame's sixteen band energies into sixteen *magnitudes*, which are the
+ * channel samples the decimator then filters.  That block is at 0x00023E3E and
+ * following, unrolled sixteen times, and Ghidra renders it as goto soup with a
+ * one-band pipeline offset - which is why it is not transcribed here yet
+ * rather than because anything about it is unclear.
+ *
+ * The algorithm is settled: it is Math_Sqrt 0x00019364 inlined, and it is the
+ * same function ambe_basop.c already carries as ambe_sqrt().  Checked
+ * coefficient by coefficient against 0x18001618:
+ *
+ *   shift  = lzcount(e) - 1;   m = (e << shift) >> 16
+ *   inner  = s16(c1 + mult_r(m, c0))
+ *   horner = s16(c2 + mult_r(m, inner))
+ *   out    = (exp & 1) ? mult_r(horner, c3) : horner
+ *   exp    = (exp + 1) >> 1
+ *
+ * so this is a call, not a transcription.  Band 0 is special-cased: it is the
+ * real part clamped at zero rather than a root, which it can be because bin 0
+ * has no imaginary part.
+ *
+ * What remains to be pinned is only the exponent bookkeeping - the common
+ * output exponent the sixteen magnitudes are aligned to before the final
+ * `(v << shift) + 0x8000 >> 16`, which the decompiler calls sVar46 and which is
+ * reassigned several times on the way down.  That wants reading against the
+ * disassembly rather than the decompiler.
+ *
+ * The frame scheduling is the other open piece: a fractional resampler whose
+ * accumulator lives at param_1 + 0x6DC, taking (accumulated + nFrameSize) / 8
+ * groups per call and keeping the remainder, with 8 input samples yielding two
+ * interleaved sample-sets and the decimator halving those to one output sample
+ * per channel.  The output buffer is 16 x 11, and the tail of
+ * Vocoder_AnalyzeSpectrum shifts each channel of the 16 x 49 ring down by the
+ * returned count and appends that many - so 11 is the per-frame capacity, not
+ * a fixed count.
+ */
+
+/*
  * The decimator, from the tail of Vocoder_AnalyzeSubbandSpectrum at
  * 0x00024EAA.  Seven symmetric taps read at a stride of 16 shorts, so they
  * walk one channel of the interleaved sets; the output pointer advances two
