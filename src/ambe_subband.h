@@ -25,4 +25,21 @@ void ambe_subband_window(int16_t out[32], const int16_t in[32]);
  */
 void ambe_subband_dft32(int16_t x[32]);
 
+/*
+ * One 32-sample frame: window, transform, and accumulate the sixteen band
+ * energies.  `bins` receives the transform (16 complex pairs, re,im) and
+ * `energy` is added to, not overwritten - the stock code sweeps many frames
+ * into one set of sixteen accumulators.
+ */
+void ambe_subband_frame(int32_t energy[16], int16_t bins[32],
+                        const int16_t in[32]);
+
+/*
+ * The decimator.  `sets` is interleaved sample-sets of 16 channels each; this
+ * produces `nout` samples for one channel, reading seven consecutive sets per
+ * output and advancing two sets between them - so it needs 2*nout + 5 sets.
+ */
+void ambe_subband_decimate(int16_t *out, const int16_t *sets, int chan,
+                           int nout);
+
 #endif /* AMBE_SUBBAND_H */

@@ -110,3 +110,53 @@ void ambe_subband_dft32(int16_t x[32])
         x[2 * k + 1] = (int16_t)(im >> 18);
     }
 }
+
+/*
+ * One frame of the sweep: window, transform, accumulate.
+ *
+ * The `>> 7` is the stock code's, and the energies are int32 accumulators that
+ * many frames add into - Vocoder_AnalyzeSubbandSpectrum zeroes them once, at
+ * the top, and sweeps the whole input before anyone reads them.
+ *
+ * The squared magnitude is computed on *signed* halves.  Ghidra renders the
+ * high half of the packed complex word as `(v >> 0x10)` on a `uint`, i.e.
+ * unsigned, while sign-extending the low half two lines away - the same
+ * inconsistency that produced overflowing magnitudes in ambe_fft.c, recorded
+ * in tests/test_fft.c.  Squaring does not rescue it: (65536 - x)^2 is not x^2.
+ */
+void ambe_subband_frame(int32_t energy[16], int16_t bins[32],
+                        const int16_t in[32])
+{
+    int b;
+
+    ambe_subband_window(bins, in);
+    ambe_subband_dft32(bins);
+
+    for (b = 0; b < 16; b++) {
+        int32_t re = bins[2 * b], im = bins[2 * b + 1];
+        energy[b] += ((re * re + im * im) * 2) >> 7;
+    }
+}
+
+/*
+ * The decimator, from the tail of Vocoder_AnalyzeSubbandSpectrum at
+ * 0x00024EAA.  Seven symmetric taps read at a stride of 16 shorts, so they
+ * walk one channel of the interleaved sets; the output pointer advances two
+ * sets, which is where the factor of two in the stage's overall decimation
+ * comes from.  Rounding is + 0x8000 before the >> 16, and the taps sum to
+ * 65536 so the whole thing is unity gain.
+ */
+void ambe_subband_decimate(int16_t *out, const int16_t *sets, int chan,
+                           int nout)
+{
+    static const int tap[7] = { 0, 1, 2, 3, 2, 1, 0 };
+    int i, t;
+
+    for (i = 0; i < nout; i++) {
+        int64_t acc = 0x8000;
+        for (t = 0; t < 7; t++)
+            acc += (int64_t)ambe_subband_fir_q15[tap[t]] *
+                   sets[chan + 16 * (2 * i + t)];
+        out[i] = (int16_t)(acc >> 16);
+    }
+}

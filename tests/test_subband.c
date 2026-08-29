@@ -153,6 +153,95 @@ int main(void)
         printf("\n    window    32 folded taps, DC 1000 -> %d (want 16000)", sum);
     }
 
+    /*
+     * The decimator, against a plain convolution.  Two things are asserted
+     * separately: that it is the symmetric 7-tap filter the table says, run
+     * down one channel at a stride of 16 and advancing two sets per output;
+     * and that it passes a constant through unchanged, which is the taps
+     * summing to 65536 seen from the other side.
+     */
+    {
+        int16_t sets[16 * 64];
+        int16_t out[16];
+        int chan, n, worst = 0;
+        uint32_t s = 999u;
+
+        for (i = 0; i < 16 * 64; i++) {
+            s = s * 1103515245u + 12345u;
+            sets[i] = (int16_t)((int32_t)((s >> 16) & 0xffff) - 32768) / 4;
+        }
+        for (chan = 0; chan < 16; chan++) {
+            ambe_subband_decimate(out, sets, chan, 16);
+            for (n = 0; n < 16; n++) {
+                double acc = 0.0;
+                int t;
+                static const int tp[7] = { 0, 1, 2, 3, 2, 1, 0 };
+                for (t = 0; t < 7; t++)
+                    acc += (double)ambe_subband_fir_q15[tp[t]] *
+                           sets[chan + 16 * (2 * n + t)];
+                acc = (acc + 32768.0) / 65536.0;
+                {
+                    int d = out[n] - (int)floor(acc);
+                    if (d < 0) d = -d;
+                    if (d > worst) worst = d;
+                    CHECK(d <= 1,
+                          "decimate ch %d out %d: %d, convolution gives %.2f\n",
+                          chan, n, out[n], acc);
+                }
+            }
+        }
+        printf("\n    decimate  16 channels x 16 outputs, worst %d LSB", worst);
+
+        /* unity gain: a constant must survive the filter */
+        for (i = 0; i < 16 * 64; i++) sets[i] = 4321;
+        ambe_subband_decimate(out, sets, 5, 16);
+        for (n = 0; n < 16; n++)
+            CHECK(out[n] == 4321, "decimate of a constant gave %d, want 4321\n",
+                  out[n]);
+        printf("\n              constant 4321 passes through unchanged");
+    }
+
+    /*
+     * The energy path.  Parseval is the check that ties the whole stage
+     * together: for a real 32-point input the sum of |X[k]|^2 over all 32 bins
+     * is 32 times the sum of x[n]^2, and bins 16..31 mirror bins 1..15.  The
+     * accumulator carries |X|^2 * 2 >> 7 on the X/16 scale, so the expected
+     * total is (32 * sum x^2) / (256 * 64), and matching that says the >> 7
+     * and the DFT's own scaling were both read right.
+     */
+    {
+        int32_t energy[16];
+        int16_t bins[32];
+        double want, got = 0.0;
+        int b;
+
+        for (i = 0; i < 32; i++)
+            x[i] = (int16_t)(9000.0 * cos(2.0 * M_PI * 5 * i / 32.0)
+                             + 3000.0 * sin(2.0 * M_PI * 2 * i / 32.0));
+
+        memset(energy, 0, sizeof(energy));
+        ambe_subband_frame(energy, bins, x);
+
+        /* the window is applied inside, so compare against the windowed input */
+        {
+            int16_t w[32];
+            double sw2 = 0.0;
+            ambe_subband_window(w, x);
+            for (i = 0; i < 32; i++) sw2 += (double)w[i] * w[i];
+            /* sum over the 16 stored bins double-counts nothing at 0 and 16,
+               so fold: total = E[0] + 2*sum(E[1..14]) + E[15] on the |X|^2
+               scale, then the stage's own 2 and >> 7 */
+            for (b = 0; b < 16; b++)
+                got += (double)energy[b] * ((b == 0 || b == 15) ? 1.0 : 2.0);
+            want = 32.0 * sw2 / 256.0 * 2.0 / 128.0;
+            CHECK(fabs(got - want) < 0.02 * want,
+                  "Parseval: energies total %.0f, want %.0f (%.1f%% off)\n",
+                  got, want, 100.0 * fabs(got - want) / want);
+            printf("\n    energy    Parseval holds to %.2f%%",
+                   100.0 * fabs(got - want) / want);
+        }
+    }
+
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
            2 * 15 + 4 + 64, worst_abs);
     printf("\n                         ");
