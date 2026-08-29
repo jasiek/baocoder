@@ -815,10 +815,11 @@ tables are extracted and asserted.
    add), two 58-sample sub-frames per band folded through `ambe_subwin_q15`,
    zero-padded into a 64-point transform, `|X|² × 2` over 32 bins with bins 0
    and 1 zeroed, per-band exponents out to the voicing rule. It reads the
-   16 × 49 ring, which is why the per-band stride is 98. Note it needs a
-   64-point forward transform: `src/ambe_fft.c` has one in `fft_forward`, but
-   that is `static` and the file's only entry point is `ambe_fft_window`, so
-   this is the one place a small change to an existing module is needed.
+   16 × 49 ring, which is why the per-band stride is 98. The 64-point transform
+   it needs is ready: `ambe_fft_forward` is now a public entry point, and
+   `tests/test_fft.c` exercises it at 64 points as well as 256 — a different
+   path (one fewer radix-2 stage, the N = 32 bit-reversal table, a shallower
+   unpack), which until now was never tested at all.
 3. **Then the voicing rule drops on top**, already fully read: per band,
    `E_harm/E_total > 0.80` with `pitch` = this library's `f0` (Q19) shifted
    right by two, and a per-band octave alternative above 200 Hz. When it lands,

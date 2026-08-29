@@ -315,7 +315,7 @@ static short unpack_real(int32_t *buf, short scale_exp, int size_bits, int shift
 }
 
 /* Dsp_FftForward 0x000256D0 */
-static short fft_forward(int32_t *buf, short scale_exp, int size_bits, int shift)
+short ambe_fft_forward(int32_t *buf, short scale_exp, int size_bits, int shift)
 {
     short e = bitrev_scale(buf, scale_exp, size_bits - 1);
     short r = unpack_real(buf, e, size_bits, shift);
@@ -372,7 +372,7 @@ short ambe_fft_window(int32_t *magsq_out, const int16_t *in, int in_len,
     }
     memset(dst, 0, (size_t)(fft_size - in_len) * sizeof(int16_t));
 
-    e = fft_forward(fft_buf, (short)(scale_bias + local_exp), size_bits, shift);
+    e = ambe_fft_forward(fft_buf, (short)(scale_bias + local_exp), size_bits, shift);
     if (magsq_out) {
         e = (short)(e * 2);
         magnitude_squared(magsq_out, fft_buf, shift + (fft_size >> 1));

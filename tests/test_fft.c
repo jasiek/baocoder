@@ -137,7 +137,96 @@ int main(void)
               mag[0], worst_leak);
     }
 
-    printf("[%d/10 peak bins exact, dB offset constant to %.2f dB] ",
-           exact_peaks, worst_spread);
+    /*
+     * The transform at 64 points, which is the size the analyser's eight-band
+     * loop uses - Dsp_FftForward(..., 6, 0) - and a different code path from
+     * everything above: one fewer radix-2 stage, the N = 32 bit-reversal table
+     * instead of the N = 128 one, and a shallower unpack recursion.  Until now
+     * ambe_fft.c was only ever exercised at 256 points, so a size-dependent
+     * error would have been invisible.
+     *
+     * This calls ambe_fft_forward directly, without a window, because that is
+     * how the band loop calls it: it does its own windowing first.  Samples go
+     * into the int16 slots in natural order, which is the packing the
+     * transform expects (slot 2m is the real half of word m).
+     */
+    {
+        double worst64 = 0.0;
+        int trial64;
+
+        for (trial64 = 0; trial64 < 8; trial64++) {
+            int32_t b64[32];
+            int16_t *slot = (int16_t *)b64;
+            double xr[64], d[32], mean = 0.0, spread = 0.0;
+            double ref2[32];
+            int i, k, n = 0;
+            short e;
+
+            for (i = 0; i < 64; i++) {
+                double v = 7000.0 * sin(2.0 * M_PI * (0.05 + 0.04 * trial64) * i)
+                         + 2000.0 * cos(2.0 * M_PI * 0.17 * i + 0.7);
+                seed = seed * 1103515245u + 12345u;
+                v += 200.0 * (((double)((seed >> 16) & 0x7fff) / 16384.0) - 1.0);
+                xr[i] = (double)(int16_t)v;
+                slot[i] = (int16_t)v;
+            }
+
+            for (k = 0; k < 32; k++) {
+                double re = 0.0, im = 0.0;
+                for (i = 0; i < 64; i++) {
+                    double a = 2.0 * M_PI * (double)k * (double)i / 64.0;
+                    re += xr[i] * cos(a);
+                    im -= xr[i] * sin(a);
+                }
+                ref2[k] = re * re + im * im;
+            }
+
+            e = ambe_fft_forward(b64, 0, 6, 0);
+            (void)e;
+
+            /* |X|^2 over the 32 bins, the way the band loop takes it */
+            {
+                int32_t m64[32];
+                int rk = 1;
+                for (k = 0; k < 32; k++) {
+                    int32_t re = (int32_t)(int16_t)(b64[k] & 0xffff);
+                    int32_t im = (int32_t)(int16_t)((uint32_t)b64[k] >> 16);
+                    m64[k] = re * re + im * im;
+                }
+                for (k = 2; k < 32; k++)
+                    if (ref2[k] > ref2[rk]) rk = k;
+                {
+                    int pk = 1;
+                    for (k = 2; k < 32; k++)
+                        if (m64[k] > m64[pk]) pk = k;
+                    CHECK(pk == rk,
+                          "64-pt trial %d: peak bin %d, reference says %d\n",
+                          trial64, pk, rk);
+                }
+                for (k = 1; k < 32; k++) {
+                    if (ref2[k] < ref2[rk] * 1e-4)
+                        continue;
+                    d[n++] = 10.0 * log10((double)m64[k] + 1.0)
+                           - 10.0 * log10(ref2[k] + 1.0);
+                }
+                CHECK(n >= 3, "64-pt trial %d: only %d usable bins\n",
+                      trial64, n);
+                for (k = 0; k < n; k++) mean += d[k];
+                mean /= (n ? n : 1);
+                for (k = 0; k < n; k++) {
+                    double ee = d[k] - mean;
+                    if (ee < 0.0) ee = -ee;
+                    if (ee > spread) spread = ee;
+                }
+                if (spread > worst64) worst64 = spread;
+                CHECK(spread < 1.5,
+                      "64-pt trial %d: dB offset varies by %.2f (mean %.2f)\n",
+                      trial64, spread, mean);
+            }
+        }
+        printf("[%d/10 peak bins exact, dB offset constant to %.2f dB; "
+               "64-pt to %.2f dB] ", exact_peaks, worst_spread, worst64);
+    }
+
     return t_done("firmware FFT vs a reference DFT");
 }

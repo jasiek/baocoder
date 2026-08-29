@@ -26,4 +26,16 @@ short ambe_fft_window(int32_t *magsq_out, const int16_t *in, int in_len,
                       short scale_bias, int32_t *fft_buf, int size_bits,
                       int shift);
 
+/*
+ * The transform on its own, Dsp_FftForward 0x000256D0.  `buf` holds 2^size_bits
+ * real samples packed even/odd into the re/im halves of 2^(size_bits-1) int32
+ * words, and is transformed in place; the real spectrum is unpacked afterwards.
+ * Returns the block-float exponent.
+ *
+ * ambe_fft_window is this with the 199-tap analysis window in front of it.  The
+ * analyser's eight-band loop needs the transform alone, at 64 points and with
+ * its own window, which is why this is a separate entry point.
+ */
+short ambe_fft_forward(int32_t *buf, short scale_exp, int size_bits, int shift);
+
 #endif /* AMBE_FFT_H */
