@@ -1,0 +1,65 @@
+--- a/32b_data.sinc	2026-08-29 13:01:45
++++ b/32b_data.sinc	2026-08-29 13:53:22
+@@ -365,6 +365,34 @@
+         i32_r_rz = product:4;
+     }
+ 
++    # The accumulating variants of mulsh, at the same sop.  Same relationship
++    # to mulsh as mulua/mulus have to mulu: the halfword product is added to
++    # or subtracted from the hi:lo accumulator instead of being written to rz,
++    # which is why rz is unused here.  Used 16 times in the FFT butterfly
++    # kernels alone, where the sequence
++    #
++    #     muls rx, r3 ; mulshs a, b ; mulsha c, d ; mflo rz
++    #
++    # is one half of a complex multiply with Q15 twiddles.
++    with : i32_r_sop = 0b100100 {
++        :mulsha i32_r_rx, i32_r_ry is i32_r_pcode = 0b00010 & i32_r_rx & i32_r_ry {
++            local op1:8 = sext(i32_r_rx[0,16]);
++            local op2:8 = sext(i32_r_ry[0,16]);
++            local acc:8 = (zext(hi) << 32) | zext(lo);
++            local tmp:8 = acc + op1 * op2;
++            lo = tmp:4;
++            hi = tmp(4);
++        }
++        :mulshs i32_r_rx, i32_r_ry is i32_r_pcode = 0b00100 & i32_r_rx & i32_r_ry {
++            local op1:8 = sext(i32_r_rx[0,16]);
++            local op2:8 = sext(i32_r_ry[0,16]);
++            local acc:8 = (zext(hi) << 32) | zext(lo);
++            local tmp:8 = acc - op1 * op2;
++            lo = tmp:4;
++            hi = tmp(4);
++        }
++    }
++
+     with : i32_r_sop = 0b100000 {
+         :divs i32_r_rz, i32_r_rx, i32_r_ry is i32_r_pcode = 0b00010 & i32_r_rz & i32_r_rx & i32_r_ry {
+             i32_r_rz = i32_r_rx s/ i32_r_ry;
+@@ -374,6 +402,27 @@
+         }
+     }
+ 
++    # The signed 32x32 multiply into the hi:lo accumulator - the signed
++    # counterpart of mulu below, one sop higher and the same shape (rz unused,
++    # result in hi:lo).
++    #
++    # Only the non-accumulating form is implemented, deliberately.  Its
++    # semantics are confirmed by result: with it the FFT butterfly kernels
++    # decompile to a textbook radix-2 butterfly, and a C transcription of that
++    # reproduces a reference DFT to 0.56 dB with every peak bin exact.  The
++    # accumulating forms at pcode 0b00010 and 0b00100 would follow by symmetry
++    # with mulua/mulus, but nothing that has been validated exercises them, so
++    # they are left out: 56 sites use the first of them, and decoding those
++    # with guessed semantics would be the confidently-wrong decompilation this
++    # project's patches README refuses.
++    with : i32_r_sop = 0b100011 {
++        :muls i32_r_rx, i32_r_ry is i32_r_pcode = 0b00001 & i32_r_rz = 0b00000 & i32_r_rx & i32_r_ry {
++            local tmp:8 = sext(i32_r_rx) * sext(i32_r_ry);
++            lo = tmp:4;
++            hi = tmp(4);
++        }
++    }
++
+     with : i32_r_sop = 0b100010 {
+         :mulu i32_r_rx, i32_r_ry is i32_r_pcode = 0b00001 & i32_r_rz = 0b00000 & i32_r_rx & i32_r_ry {
+             local tmp = i32_r_rx * i32_r_ry;

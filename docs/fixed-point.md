@@ -299,26 +299,36 @@ the Ghidra processor module rather than anything about the image.
 
 `taligentx/ghidra_csky_ck804` v0.2 implements the unsigned `mulu`/`mulua`/`mulus`
 family (32×32 into the `hi:lo` accumulator) and the plain `mulsh`, but not the
-signed 32×32 family nor `mulsh`'s accumulating variants:
+signed 32×32 form nor `mulsh`'s accumulating variants:
 
 ```
-i32_r_sop = 0b100011  pcode 1/2/4  ->  muls / mulsa / mulss
-i32_r_sop = 0b100100  pcode 2/4    ->  mulsha / mulshs
+i32_r_sop = 0b100011  pcode 0b00001  ->  muls     42 sites
+i32_r_sop = 0b100100  pcode 0b00010  ->  mulsha   42 sites
+i32_r_sop = 0b100100  pcode 0b00100  ->  mulshs   12 sites
 ```
 
 Ghidra's flow analysis stops dead at an instruction it cannot decode, so every
-function containing one is silently truncated. The encodings were identified by
-their neighbours rather than from a manual — each has the shape of the unsigned
-family one sop lower, and the C-SKY V2 multiply group pairs unsigned and signed
-families adjacently — and a table learned from 884 register-ALU instructions
-that Ghidra *does* decode confirmed none of the five appeared in the implemented
-set.
+function containing one is silently truncated. Structure suggested the
+encodings — each has the shape of the family one sop lower, and the C-SKY V2
+multiply group pairs unsigned and signed families adjacently — and a table
+learned from 884 register-ALU instructions that Ghidra *does* decode confirmed
+none of the three appeared in the implemented set.
 
-Confirmed by result, not by the reasoning. On bytes Ghidra had never reached,
-the first family decodes as `muls r0,r2 / mfhi r12 / mflo r0` — the accumulator
-read that has to follow it. `docs/patches/csky-muls-family.patch` carries the
-fix, in the same form as the reverse-engineering project's existing
-`csky-movih-truncation.patch`.
+But structure is not evidence about *semantics*, and the reverse-engineering
+project's patches README says so in as many words: it had recorded this whole
+family as deliberately unpatched, because inventing p-code for a MAC
+instruction produces confidently wrong decompilation. What made these three
+different is that they could be checked. On bytes Ghidra had never reached the
+first decodes as `muls r0,r2 / mfhi r12 / mflo r0` — the accumulator read that
+has to follow a multiply into `hi:lo` — and with all three, the FFT below
+reproduces a reference DFT. Wrong semantics do not produce a working FFT.
+
+The signed family's *accumulating* forms follow just as obviously by symmetry
+and are deliberately left out. Nothing validated exercises them, and the first
+has 56 sites — more than any encoding in the patch. `docs/patches/csky-muls.patch`
+carries the fix and says which forms are evidenced; it lives alongside the
+reverse-engineering project's `csky-movih-truncation.patch`, which is where the
+canonical copy is.
 
 One trap worth recording: a corrected sleigh does not by itself fix a program
 Ghidra has already failed on. It records an error at the address and will not

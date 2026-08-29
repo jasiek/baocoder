@@ -22,10 +22,10 @@
  *   Dsp_ComputeMagnitudeSquared 0x0001AB38
  *
  * The two butterfly kernels only decompile at all because of
- * docs/patches/csky-muls-family.patch: the Ghidra C-SKY module was missing the
- * two multiply families they are built from, and Ghidra truncates a function
- * at the first instruction it cannot decode.  Before that fix these were 68
- * bytes of a 190-byte function.
+ * docs/patches/csky-muls.patch: the Ghidra C-SKY module was missing the three
+ * multiply instructions they are built from - muls, mulsha and mulshs - and
+ * Ghidra truncates a function at the first instruction it cannot decode.
+ * Before that fix these were 68 bytes of a 190-byte function.
  *
  * Complex samples are packed one to an int32, real in the low half and
  * imaginary in the high half, which is the layout the stock code uses and
