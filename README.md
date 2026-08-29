@@ -16,7 +16,7 @@ test against; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 799 972 checks against known-good vectors, plus the integer-only check
+make test     # 801 718 checks against known-good vectors, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -36,6 +36,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | 72-bit on-air frame ↔ 49-bit payload | `src/ambe_fec.c` | firmware `Vocoder_DescrambleVoiceFrame` `0x0001893C`, `Vocoder_DeinterleaveVoiceBits` `0x000230A4`, `Dsp_LcgSignScramble` `0x00021FE0` |
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
+| Windowed FFT (PCM -> spectrum) | `src/ambe_fft.c` | firmware `Dsp_WindowAndComputeFft` `0x00019B6C`, `Dsp_FftForward` `0x000256D0`, `Dsp_FftBitReverseScale` `0x00025224`, the two butterfly kernels `0x00025160` / `0x0002509C` |
 | Fixed-point primitives (log2, pow2, sqrt, cos, divide) | `src/ambe_basop.c` | firmware `Math_Log2` `0x0001903C`, `Math_Pow2` `0x000191C0`, `Math_Sqrt` `0x00019364`, `Math_TableInterpLookup` `0x00019000`, `Math_SDiv` `0x00018D74` |
 | Quantiser codebooks, voicing patterns, block lengths, and the primitives' coefficients | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
 | Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |
@@ -234,6 +235,7 @@ independent implementations:
 |---|---|---|
 | `test_aes` | AES against the FIPS-197 Appendix B and C vectors, all three key lengths, plus the DMRA IV expansion | 92 checks |
 | `test_golay` | the Golay code's defining property, exhaustively: 2048 syndromes ↔ 2048 error patterns of weight ≤ 3, all corrected; minimum distance 7; systematic encoding | 30 720 checks |
+| `test_fft` | the firmware's windowed FFT against a reference DFT applying the same window: a block-float transform has an arbitrary scale, so what is asserted is that the dB offset is *constant* | 1 321 checks; 10/10 peak bins exact, offset constant to **0.56 dB** |
 | `test_basop` | the firmware's log2, pow2, sqrt and cos swept across their **whole** input domains against libm, plus log2's coefficients against the Taylor series they turn out to be | 10 621 checks; cos 6.1e-5, log2 2.6e-3, pow2 1.2e-4, sqrt 1.3e-3 — the radio's accuracies, not this code's |
 | `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 123 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` **4.8e-5** / `L` **120/120** |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
@@ -367,15 +369,14 @@ exercised by real data.
 
 ## Limitations
 
-* The analyser is only partly the firmware's. Its window is: a 199-point
-  Hamming read out of the image at SRAM `0x180010A8`, used with the radio's
-  199-into-256 geometry. The transform and the pitch and voicing decisions
-  around it are still a conventional MBE estimator. So encoded audio is not
-  bit-identical to what the radio would produce from the same input — only the
-  quantiser below it is exact. The firmware's transform is now fully readable,
-  after `docs/patches/csky-muls-family.patch` fixed the two missing multiply
-  families that were truncating it; `docs/fixed-point.md` records what is left
-  to write.
+* The analyser is only partly the firmware's. Its whole spectral front end now
+  is — the 199-point Hamming window at SRAM `0x180010A8`, the 199-into-256
+  geometry, and the block-floating-point FFT itself (`src/ambe_fft.c`, checked
+  against a reference DFT in `tests/test_fft.c`). The pitch and voicing
+  decisions on top of it are still a conventional MBE estimator, so encoded
+  audio is not bit-identical to what the radio would produce from the same
+  input; only the quantiser below it is exact. `docs/fixed-point.md` records
+  what is left to write.
 * b1 is not uniquely recoverable when a frame's voicing is degenerate: the
   32-entry table has only 13 distinct 8-band patterns, and bands no harmonic
   maps to are never read.

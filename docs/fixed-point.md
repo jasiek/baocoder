@@ -356,21 +356,55 @@ what they must reproduce (`tests/test_tables.c`): 256 twiddles of
 `exp(−j2πk/512)` to 1 LSB, and two delta-coded permutation tables that decode to
 the bit-reversal of N=32 and N=128 exactly.
 
+### The transform, transcribed
+
+`src/ambe_fft.c` is that chain, and the analyser now uses it in place of the
+O(N²) DFT it had. Its whole spectral front end is the radio's: the radio's
+window, the radio's geometry, the radio's transform.
+
+`tests/test_fft.c` holds it against a reference DFT applying the same window.
+The measure is a **ratio, not a correlation**, and the choice carries the
+argument: a block-floating-point transform has an arbitrary common scale, so
+if it is right then the difference between its dB spectrum and the reference's
+is a *constant*. It is — constant to **0.56 dB** across the bins within 40 dB
+of the peak, with all ten peak bins exactly right.
+
+Three transcription errors were caught by that test and none was visible by
+reading:
+
+* Ghidra renders `mulsh`'s sign extension as `& 0xffff` on the operands, so the
+  squared magnitudes became unsigned products and overflowed to negative.
+* The stock buffer pointer is `ushort *`, so `+ (1 << size_bits)` advances half
+  as far as the same expression on the int32 complex words. Transcribed
+  straight it overran by 2× and corrupted everything downstream.
+* In the real-spectrum unpacking the second output's halves are crossed — the
+  real combination is written to the imaginary slot and vice versa. Missing
+  that mirrored the spectrum about N/2, which looks entirely plausible until
+  you check which bin the peak is in.
+
+That last one is the argument for testing transcriptions against what they
+should compute rather than reviewing them. A mirrored spectrum has the right
+shape, the right dynamic range and the right noise floor.
+
+One bin is derived rather than transcribed, and is marked so in the source. Bin
+N/4 is the packed real FFT's self-conjugate point, where the general
+combination collapses to `X[N/4] = conj(Z[N/4])`. The stock code reaches it
+through a degenerate pass of the unpacking loops whose iteration count Ghidra
+does not recover — the argument is left in a register — and both candidate
+counts leave that one bin several dB wrong against the reference. It is written
+from the identity instead.
+
 ### What remains
 
-The transform is now fully readable but not yet written in C. In order:
+The decisions on top of the spectrum:
 
-1. Transcribe the FFT into `src/ambe_fft.c` and check it against a reference
-   DFT, the way `tests/test_basop.c` checks the primitives. This is where a
-   wrong transcription would first become visible, so it comes before anything
-   that consumes the spectrum.
-2. Settle the role of `Vocoder_SelectVoicingCandidate` `0x000177F0` — the
+1. Settle the role of `Vocoder_SelectVoicingCandidate` `0x000177F0` — the
    evidence says pitch, not voicing — and transcribe
-   `Vocoder_UpdateEnergyAndHistory` `0x000217CC`, which builds the array it
-   searches.
-3. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, and the pitch and
-   voicing decisions. Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C`
-   still truncates at 28 lines — a different blocker, not this one.
+   `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean), which
+   builds the array it searches.
+2. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, now 746 lines and clean.
+   Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C` still truncates at
+   28 lines — a different blocker from the one that has been fixed.
 
 ## Still open
 
