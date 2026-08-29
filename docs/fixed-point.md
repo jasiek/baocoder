@@ -520,6 +520,56 @@ percent of the best — which is a different algorithm, not a tuning difference.
 
 The eight bits pack **MSB first**.
 
+### What that rule is worth here, measured
+
+The firmware's constant is 0.80 and this library's is 0.60, on what looked like
+the same measure. Swapping it would have been the obvious move. It is wrong,
+and finding out why turned up something more useful.
+
+`tests/test_encode_voicing.c` measures the decision the same way
+`test_encode_pcm` measures pitch — decode a real frame, re-analyse its audio,
+compare the recovered `b1` with the transmitted one. **67% of the corpus's
+bands are voiced**, so the number to beat is not 50% but the trivial answer
+"voiced every time". Sweeping the threshold over 1117 frames:
+
+| threshold | b1 exact | bands correct | always-voiced |
+|---|---|---|---|
+| 0.01 | 22.1 % | 68.73 % | 67.26 % |
+| 0.20 | 20.0 % | 68.24 % | 67.26 % |
+| 0.40 | 15.6 % | 67.98 % | 67.26 % |
+| **0.60 (shipped)** | **5.5 %** | **48.04 %** | 67.26 % |
+| 0.80 (the firmware's) | 0.5 % | 34.95 % | 67.26 % |
+
+Three things fall out, and only the first is about the constant.
+
+**The firmware's 0.80 does not transfer**, and badly — 35%. So the two measures
+are not the same quantity despite the same shape: the radio's denominator
+starts at a pitch-dependent bin and its numerator sums a window on the harmonic
+grid, where this library sums peak bins over a fixed band. A different measure,
+not a different constant.
+
+**The shipped 0.60 is worse than answering "voiced" every time** — 48% against
+67%. That is not a tuning preference; the decision is actively costing
+accuracy.
+
+**And retuning does not rescue it.** The plateau below 0.40 is flat — 68.0% to
+68.7% all the way down to 0.01, where the rule degenerates into never calling a
+band unvoiced — so the entire discriminative power of this measure is about
+1.5 points, a kappa near 0.04. It carries essentially no information.
+
+The constant is therefore **unchanged**, and the reason is a coupling worth
+recording: voicing and amplitude are entangled here, because an unvoiced
+harmonic is scaled by 1/0.2046 at the amplitude step. At threshold 0.20 the
+round-trip level falls from ×0.99 to **×0.887**, and no value of
+`AMBE_ML_SCALE_Q16` restores it — sweeping that constant from 1000 to 65000
+saturates at 0.887. A decibel of level is a real cost; one point on a decision
+with no information is not a real gain.
+
+`test_encode_voicing.c` is kept as a **characterisation** test: it pins the
+current behaviour and prints the baseline beside it every run, so the gap is
+visible rather than buried. The fix is to transcribe
+`Vocoder_SelectSpectralSubbands`, not to move a number.
+
 ### A second analysis window
 
 `Vocoder_AnalyzeSpectrum` runs its own transform before pitch and voicing:

@@ -68,13 +68,42 @@
  * is quantised to 32 steps - 0.96 is the closest reachable to unity, and
  * anything from 28000 to 31846 lands on it.
  */
+#ifndef AMBE_ML_SCALE_Q16
 #define AMBE_ML_SCALE_Q16 30000       /* 0.4578 in Q16 */
+#endif
 
 /* ln2 / 0.693, undoing the truncated ln2 the decoder's amplitude step uses */
 #define K_LN2_OVER_0P693_Q30 1074765414
 
-/* the voicing threshold, 0.60, and the octave guard, 0.85, as ratios */
+/*
+ * The voicing threshold, and the octave guard 0.85, as ratios.
+ *
+ * 0.60 is a guess, and tests/test_encode_voicing.c measures what it is worth:
+ * it agrees with the transmitted pattern on 48% of bands, where answering
+ * "voiced" every time scores 67%.  The decision is worse than a constant.
+ *
+ * It is still 0.60, and the reason is worth recording so nobody re-runs the
+ * experiment.  Sweeping it gives a broad flat plateau below about 0.40 -
+ * 68.0% to 68.7% all the way down to 0.01, where the rule degenerates into
+ * never calling a band unvoiced - and *nothing* beats the trivial answer by
+ * more than 1.5 points, a kappa near 0.04.  So the best available retune buys
+ * almost nothing, and it is not free: voicing and amplitude are coupled here,
+ * because an unvoiced harmonic is scaled by 1/0.2046 at ambe_analysis.c's
+ * amplitude step.  At 0.20 the round-trip level falls from x0.99 to x0.887 and
+ * *no* value of AMBE_ML_SCALE_Q16 restores it - it saturates there.  Trading a
+ * decibel of level for one point on a decision that carries no information is
+ * a bad trade, so the constant stays.
+ *
+ * The fix is not a constant.  The firmware's rule is known now -
+ * Vocoder_SelectSpectralSubbands 0x0002AA20, voiced when E_harm/E_total > 0.80
+ * - and its 0.80 does not transfer, scoring 35% here: its denominator starts
+ * at a pitch-dependent bin and its numerator sums a window on the harmonic
+ * grid.  A different measure, not a different constant.  docs/fixed-point.md
+ * carries the details.
+ */
+#ifndef VOICE_NUM
 #define VOICE_NUM 60
+#endif
 #define VOICE_DEN 100
 #define OCTAVE_NUM 85
 #define OCTAVE_DEN 100
