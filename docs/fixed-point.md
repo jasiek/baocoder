@@ -404,59 +404,63 @@ does not recover — the argument is left in a register — and both candidate
 counts leave that one bin several dB wrong against the reference. It is written
 from the identity instead.
 
-### The pitch decision, read
+### The pitch decision that turned out not to be one
 
-`0x000177F0` is settled: it selects a pitch candidate, not a voicing decision,
-and is renamed `Vocoder_SelectPitchCandidate`. Its tables are now read rather
-than described.
+`0x000177F0` had been renamed `Vocoder_SelectPitchCandidate`, correcting a
+still earlier `Vocoder_SelectVoicingCandidate`. Both names are wrong, and so
+was the plan to transcribe it. **It is a DTMF decoder.**
 
-Four pointer pairs in its literal pool land in one contiguous SRAM block. The
-pairing is the part that is easy to get wrong — **a row's weights are the four
-shorts immediately before its offsets, not after**:
-
-| offsets at | offsets | weights at | weights |
-|---|---|---|---|
-| `0x1800140C` | 20, 23, 25, 28 | `0x18001404` | 11420, 12616, 13959, 15417 |
-| `0x1800141C` | 37, 41, 45, 50 | `0x18001414` | 19808, 21889, 24199, 26755 |
-| `0x1800142C` | 17, 19, 22, 24 | `0x18001424` | 9929, 11005, 12182, 13433 |
-| `0x1800143C` | 32, 35, 39, 44 | `0x18001434` | 17234, 19030, 21242, 23421 |
-
-An offset is the base of a five-tap window — `Dsp_FindMaxEnergyBlockIndex`
-`0x000177B0` sums five consecutive int32 at each of a row's four offsets and
-keeps the largest. What the weights are is forced by
-`Vocoder_CandidateEnergyPassesThreshold` `0x00017670`, which builds the first
-moment `M = 2·Σ k·block[k]` over that window and tests
+Reading its tables settled the arithmetic first. Four pointer pairs in its
+literal pool land in one contiguous SRAM block, and a row's weights are the
+four shorts immediately *before* its offsets, not after. An offset is the base
+of a five-tap window — `Dsp_FindMaxEnergyBlockIndex` `0x000177B0` sums five
+consecutive int32 at each of a row's four offsets and keeps the largest — and
+`Vocoder_CandidateEnergyPassesThreshold` `0x00017670` builds the first moment
+`M = 2·Σ k·block[k]` over that window and tests
 
 ```
 | 2·E·off + M − T |  <  (thresh · T) >> 20,    T = (2·W·E) >> 9
 ```
 
-Dividing by `2E` collapses it to `| off + centroid − W/512 | < (thresh/2^20)·(W/512)`.
-So `W` is the **nominal position in the energy array in Q9**, and the rule is a
-*relative* one: accept the candidate when its window's energy centroid sits
-within a fixed percentage of where that candidate says the pitch should be.
+which divided by `2E` is `| off + centroid − W/512 | < (thresh/2^20)·(W/512)`.
+So `W` is a nominal position in Q9 and the tolerance is relative.
 
-Two checks decide the reading rather than merely fitting it. All sixteen
-`W/512` land inside their own window `[off, off+4]`, each within ±0.5 of its
-centre — a weight meaning anything else would not centre on the window it is
-indexed with. And the two thresholds come out exactly round: `0x51EC`/2^20 =
-**2.00005 %**, `0x4189`/2^20 = **1.59998 %**.
+What the positions *are* comes from this project's own FFT transcription.
+`Vocoder_ProcessFrame` `0x00016E04` passes `pCtx + 0x18` as the first argument
+of `Dsp_WindowAndComputeFft` — which `ambe_fft.c` has as `magsq_out`, writing
+`shift + (fft_size >> 1)` = 129 int32, exactly the `0x204` bytes to the next
+history slot. The array is the **|X|² half-spectrum of a 256-point FFT at
+8 kHz**, so an index is a bin at 31.25 Hz. On that basis:
 
-The octave structure is then visible in the positions rather than assumed —
-within a row they are geometric with ratio 1.1053, and the `0x1800141C` row is
-1.9954× the `0x1800142C` row. A pair is accepted only when both halves pass.
+| row | `W/512` as a bin | frequency |
+|---|---|---|
+| `0x1800140C` | 22.305, 24.641, 27.264, 30.111 | **697, 770, 852, 941 Hz** |
+| `0x1800141C` | 38.688, 42.752, 47.264, 52.256 | **1209, 1336, 1477, 1633 Hz** |
+
+The DTMF row and column groups. Solving each of the eight for the sample rate
+that would make it exact gives 7999.7–8000.2 Hz. The 16-entry table at
+`0x180013E4`, indexed `[(i + j*4) & 15]`, then reproduces the DTMF keypad
+exactly — sixteen of sixteen, `A`–`D` = 10–13, `*` = 14, `#` = 15 — and the
+thresholds are a frequency tolerance: ITU-T Q.24 accepts within ±1.5 % and
+rejects beyond ±3.5 %, and these are 2.00005 % and 1.59998 %.
+
+A second 4×4 grid runs through the same path tagged `+ 0x90`, at 606.0/671.7/
+743.5/819.9 × 1051.9/1161.5/1296.5/1429.5 Hz. It is left unidentified. It has
+DTMF's geometric shape at 0.870× its frequencies but is not DTMF at another
+rate — forcing that fit spreads the sample rate over 9114–9202 Hz where the
+real grid fits to 0.005 %.
+
+The useful part for this branch is negative: **`0x000177F0` is not part of the
+speech analyser and this library does not need it.** It runs on the analyser's
+spectrum only because that spectrum is already in the buffer.
 
 ### What remains
 
-1. `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean), which
-   builds the array those offsets index. The consumer bounds it: the tail of
-   `0x000177F0` searches `pEnergyArray + 0x14` for `0x76` entries and adds 5,
-   so the array is 128 int32 searched over indices **5..122**, with the caller
-   `FUN_0001732C` testing the result against `0x13` = 19 and `0x3A` = 58.
-   Until that function is read, what the index *means* is inference, not
-   evidence — the candidate range 19..58 at 8 kHz would be 421..138 Hz if it is
-   a period in samples, which fits speech pitch and fits nothing else tried,
-   but it has not been shown.
+1. `Vocoder_UpdateEnergyAndHistory` `0x000217CC` (483 lines, clean). This one
+   is still the analyser's: it conditions the `|X|²` array in place, calls
+   `Vocoder_SmoothSpectralEnvelope`, maintains adaptive floor levels, and
+   shifts the three-deep history. It is what stands between the transcribed
+   transform and the parameters.
 2. Then `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, now 746 lines and clean.
    Its callee `Vocoder_NormalizeSpectralArrays` `0x0002A70C` still truncates at
    28 lines — a different blocker from the one that has been fixed.
