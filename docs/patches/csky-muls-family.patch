@@ -1,36 +1,89 @@
-# C-SKY V2: the signed 64-bit multiply family is missing from the module
+# C-SKY V2: two 64-bit-accumulator multiply families are missing from the module
 #
-# taligentx/ghidra_csky_ck804 v0.2 implements the unsigned mulu/mulua/mulus
-# family at i32_r_sop = 0b100010 but not its signed counterpart at 0b100011.
+# taligentx/ghidra_csky_ck804 v0.2 implements mulu/mulua/mulus (unsigned 32x32
+# into the hi:lo accumulator) and the plain mulsh (signed 16x16 into a
+# register), but not the signed 32x32 family nor mulsh's accumulating variants.
 # Ghidra's flow analysis stops dead at an instruction it cannot decode, so
 # every function containing one is silently truncated - the decompiler emits
-# halt_baddata() at the first line and the function body stops short.
+# halt_baddata() at the first line and the body stops short.
 #
-# 42 sites across the IRAM image are affected.  Among them the FFT butterfly
-# kernels the vocoder's analyser depends on:
+#     i32_r_sop = 0b100011  pcode 1/2/4  ->  muls / mulsa / mulss
+#     i32_r_sop = 0b100100  pcode 2/4    ->  mulsha / mulshs
 #
-#     Dsp_FftStageButterfly       0x00025160   truncates at 0x000251A4
-#     Dsp_FftFinalStageButterfly  0x0002509C   truncates at 0x000250E0
+# The encodings are identified by their neighbours rather than from a manual:
+# each has the shape of the unsigned family one sop lower (rz unused, result
+# in hi:lo), and the C-SKY V2 multiply group pairs unsigned and signed
+# families adjacently.  A table learned from 884 register-ALU instructions
+# that Ghidra does decode confirms none of the five appears in the
+# implemented set.
 #
-# The encoding is identified by its neighbours rather than by a manual: the
-# instruction is op=0b0001 sop=0b100011 pcode=0b00001 with rz=0, which is
-# exactly the shape of mulu one sop lower, and the C-SKY V2 multiply group
-# pairs unsigned and signed families adjacently.
+# Confirmed by the result rather than by the reasoning: on bytes Ghidra had
+# never reached, the first family decodes as `muls r0,r2 / mfhi r12 / mflo r0`
+# - the accumulator read that must follow it - and with both families the FFT
+# butterfly kernels decompile to a textbook radix-2 butterfly with Q15
+# twiddles, with no warnings.
+#
+# Measured effect on the DM-32UV image:
+#
+#     Dsp_FftStageButterfly       0x00025160     68 ->  190 bytes
+#     Dsp_FftFinalStageButterfly  0x0002509C     68 ->  190 bytes
+#     Vocoder_SynthesizeVoiced    0x0001DE10    366 -> 2378 bytes
+#     Vocoder_AnalyzeSpectrum     0x000205B8   2464 -> 4362 bytes
+#
+# The last two are the speech analyser and the voiced synthesiser; both now
+# decompile with zero warnings where they previously truncated.
+#
+# A corrected sleigh does not by itself fix a program Ghidra has already
+# failed to disassemble: it records an error at the address and does not
+# retry.  ClearAndRedisasm.java and RepairTruncated.java beside this patch
+# clear the stale code units and re-disassemble.
 #
 # Apply to the installed module's data/languages/32b_data.sinc, then
 # recompile and restart Ghidra:
 #
-#     $GHIDRA/support/sleigh -a <module>/data/languages
+#     $GHIDRA/support/sleigh -f <module>/data/languages/csky_v2.slaspec
 #
 --- a/32b_data.sinc	2026-08-29 13:01:45
-+++ b/32b_data.sinc	2026-08-29 13:01:45
-@@ -371,7 +371,33 @@
-         }
-         :divu i32_r_rz, i32_r_rx, i32_r_ry is i32_r_pcode = 0b00001 & i32_r_rz & i32_r_rx & i32_r_ry {
-             i32_r_rz = i32_r_rx / i32_r_ry;
-+        }
++++ b/32b_data.sinc	2026-08-29 13:18:01
+@@ -363,6 +363,34 @@
+         local op2:4 = sext(i32_r_ry[0,16]);
+         local product:8 = zext(op1) * zext(op2);
+         i32_r_rz = product:4;
 +    }
 +
++    # The accumulating variants of mulsh, at the same sop.  Same relationship
++    # to mulsh as mulua/mulus have to mulu: the halfword product is added to
++    # or subtracted from the hi:lo accumulator instead of being written to rz,
++    # which is why rz is unused here.  Used 16 times in the FFT butterfly
++    # kernels alone, where the sequence
++    #
++    #     muls rx, r3 ; mulshs a, b ; mulsha c, d ; mflo rz
++    #
++    # is one half of a complex multiply with Q15 twiddles.
++    with : i32_r_sop = 0b100100 {
++        :mulsha i32_r_rx, i32_r_ry is i32_r_pcode = 0b00010 & i32_r_rx & i32_r_ry {
++            local op1:8 = sext(i32_r_rx[0,16]);
++            local op2:8 = sext(i32_r_ry[0,16]);
++            local acc:8 = (zext(hi) << 32) | zext(lo);
++            local tmp:8 = acc + op1 * op2;
++            lo = tmp:4;
++            hi = tmp(4);
++        }
++        :mulshs i32_r_rx, i32_r_ry is i32_r_pcode = 0b00100 & i32_r_rx & i32_r_ry {
++            local op1:8 = sext(i32_r_rx[0,16]);
++            local op2:8 = sext(i32_r_ry[0,16]);
++            local acc:8 = (zext(hi) << 32) | zext(lo);
++            local tmp:8 = acc - op1 * op2;
++            lo = tmp:4;
++            hi = tmp(4);
++        }
+     }
+ 
+     with : i32_r_sop = 0b100000 {
+@@ -374,6 +402,32 @@
+         }
+     }
+ 
 +    # Signed counterpart of the mulu/mulua/mulus family below.  Same shape -
 +    # rz must be 0, the 64-bit result lands in hi:lo - one sop higher, and
 +    # signed.  Its absence truncated every function that used it, because
@@ -42,7 +95,7 @@
 +            local tmp:8 = sext(i32_r_rx) * sext(i32_r_ry);
 +            lo = tmp:4;
 +            hi = tmp(4);
-         }
++        }
 +        :mulsa i32_r_rx, i32_r_ry is i32_r_pcode = 0b00010 & i32_r_rz = 0b00000 & i32_r_rx & i32_r_ry {
 +            local acc:8 = (zext(hi) << 32) | zext(lo);
 +            local tmp:8 = acc + sext(i32_r_rx) * sext(i32_r_ry);
@@ -55,6 +108,8 @@
 +            lo = tmp:4;
 +            hi = tmp(4);
 +        }
-     }
- 
++    }
++
      with : i32_r_sop = 0b100010 {
+         :mulu i32_r_rx, i32_r_ry is i32_r_pcode = 0b00001 & i32_r_rz = 0b00000 & i32_r_rx & i32_r_ry {
+             local tmp = i32_r_rx * i32_r_ry;
