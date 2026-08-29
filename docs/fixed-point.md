@@ -614,6 +614,48 @@ lines, no `halt_baddata`). Both are readable now; neither is small. Until that
 lands, the voicing decision here stays the guessed one, and
 `tests/test_encode_voicing.c` keeps printing what it is worth.
 
+### Why the measure fails here, diagnosed
+
+The formula is not the problem. The firmware's numerator, read out of
+`Dsp_SumSpectralBand`, sums a **half-step-wide window centred on each
+harmonic** — `[0.75·step + k·step, 1.25·step + k·step]` — which is exactly what
+this library's `d <= bph_q16/4` test already does. Same measure.
+
+What differs is what the ratio *is worth on this spectrum*. Instrumenting it
+(`-DAMBE_VOICING_DIAG`, guarded and never built into the library) and splitting
+the corpus by harmonic spacing:
+
+| bins per harmonic | mean ratio, voiced | unvoiced | separation |
+|---|---|---|---|
+| < 4 bins (8320 bands) | 0.474 | 0.367 | +0.107 |
+| 4–8 bins (407 bands) | 0.550 | 0.434 | +0.116 |
+| > 8 bins (184 bands) | 0.428 | 0.476 | **−0.048** |
+
+Two things follow, and together they explain every number measured above.
+
+**The whole distribution lives near 0.4.** Its two means are 0.474 and 0.367,
+midpoint 0.420. A threshold of 0.60 sits above essentially all of it, so the
+rule declares almost everything unvoiced — which is exactly the 48 % it scores
+against a 67 %-voiced corpus. The firmware's 0.80 is further above still, hence
+35 %. Neither constant was ever going to work here, because the ratio never
+reaches those values on this spectrum.
+
+**And the separation is only ~0.11, with the sign flipping above 8 bins.** That
+is the flat plateau from the threshold sweep: overlapping distributions plus a
+2:1 voiced prior push the best decision far below the midpoint, toward
+answering "voiced" always.
+
+The cause is resolution. **Over 93 % of the corpus's bands have fewer than 4
+bins per harmonic**, where a 199-sample window's main lobe is comparable to the
+harmonic spacing itself, so the ±step/4 window cannot isolate a harmonic from
+its neighbours and the ratio saturates around 0.4 whatever the voicing. The
+radio does not have this problem because it does not measure on this spectrum:
+it measures on eight sub-band transforms, which is what the filterbank below
+exists to provide.
+
+So the fix really is the filterbank, and the diagnosis says why rather than
+merely that.
+
 ### The filterbank, mapped
 
 The band-construction loop in `Vocoder_AnalyzeSpectrum` is what stands between

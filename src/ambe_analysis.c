@@ -279,6 +279,20 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
             voiced[i] = (bandtot[i] > 0) &&
                         (bandpk[i] * VOICE_DEN > bandtot[i] * VOICE_NUM);
         }
+#ifdef AMBE_VOICING_DIAG
+        /* Diagnostic only, never built into the library: export the ratio and
+           the geometry so tools can ask whether the measure separates at all. */
+        {
+            extern double ambe_diag_ratio[8];
+            extern int    ambe_diag_valid;
+            extern double ambe_diag_bph;
+            for (i = 0; i < 8; i++)
+                ambe_diag_ratio[i] = bandtot[i] > 0
+                    ? (double)bandpk[i] / (double)bandtot[i] : -1.0;
+            ambe_diag_bph = bph_q16 / 65536.0;
+            ambe_diag_valid = 1;
+        }
+#endif
         /* a frame with no periodicity at all is entirely unvoiced */
         if (ambe_bf_gt(ambe_bf_from_q(UNVOICED_SCORE_Q15, 15), best))
             for (i = 0; i < 8; i++) voiced[i] = 0;
