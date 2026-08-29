@@ -28,4 +28,23 @@ extern const short ambe_dg_q11[32];         /* gain     SRAM 0x180038B4 */
 extern const short ambe_lmprbl[228];        /* [57][4]  SRAM 0x18002030, unpacked */
 extern const unsigned int ambe_vuv_packed[128]; /* voicing SRAM 0x18003628 */
 
+/* --- the fixed-point math primitives' coefficients ----------------------
+ *
+ * The radio has no FPU: its vocoder runs ITU-T G.191 style basic operators
+ * over a block-floating-point package in IRAM (Math_FloatAdd 0x00018DD8 and
+ * friends, whose 50 callers are the vocoder).  These are those operators'
+ * coefficients, from the same SRAM window as the codebooks above and reached
+ * through each function's literal pool.  Signed 16-bit Q15.
+ *
+ * 0x18001600..0x1800182F is contiguous, and the values identify themselves:
+ * log2's leading term is 1/sqrt(2), pow2's fifth is ln2, and the 512-entry
+ * table is cosine to within one LSB at every point.
+ */
+#define AMBE_Q15 32768.0f
+
+extern const short ambe_log2_coeff_q15[6];   /* Math_Log2 0x0001903C     */
+extern const short ambe_pow2_coeff_q15[6];   /* Math_Pow2 0x000191C0     */
+extern const short ambe_sqrt_coeff_q15[12];  /* Math_Sqrt 0x00019364     */
+extern const short ambe_cos512_q15[512];     /* Math_TableInterpLookup   */
+
 #endif

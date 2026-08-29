@@ -17,3 +17,4 @@ ambe_encode
 tests/test_encode_sweep
 tests/test_aes
 tools/dmra_decrypt
+tests/test_basop
