@@ -483,17 +483,72 @@ both in the reverse-engineering project's `docs/patches/`:
 blocker from the one that has been fixed", went 28 → 168 lines. The blocker was
 `mthi`/`mtlo`.
 
+### The voicing rule, read
+
+`Vocoder_SelectSpectralSubbands` `0x0002AA20` is the voicing mask, and it now
+reads cleanly. Eight bands, the spectrum advancing 32 int16 per band, with
+`pitch` from `Vocoder_RefinePitchEstimate`:
+
+```
+E_total = Math_ArraySum(spectrum + sVar7*2, 0x20 - sVar7),  sVar7 = pitch/1024 + 1
+E_harm  = Dsp_SumSpectralBand(spectrum, pitch, 6, 0x40)
+v       = Math_OneMinusRatioQ15(E_harm, E_total)
+voiced when v < 0x199A
+```
+
+`Dsp_SumSpectralBand` `0x000263D0` walks the band **on the harmonic grid** —
+step `pitch*128` in 16.16, starting at `1.0 + 0.75*step` — summing a window at
+each harmonic. So the measure is the one this file already described from
+first principles: how much of a band's energy sits at the harmonic peaks.
+
+**The threshold is not what it looks like.** `0x199A/0x8000 = 0.2000` exactly,
+which invites "voiced below 0.2". `Math_OneMinusRatioQ15` `0x0002A6AC` returns
+`0x7FFF − num/den` — the *complement* — so the rule is
+
+> voiced when **E_harm / E_total > 0.80**.
+
+This library uses 0.60 for the same decision. The two are not directly
+swappable — the firmware's denominator starts at a pitch-dependent bin and its
+numerator uses a specific harmonic window — but 0.60 was a guess and 0.80 is
+the radio's.
+
+**The octave guard is per band and energy-based.** When `pitch > 0xCCD` each
+band also evaluates one octave down (`nBand = 5`, `sVar7 = pitch/2048 + 1`) and
+`Math_FloatGreater` keeps whichever hypothesis carries more energy. This
+library instead applies one global rule — prefer the shortest lag within a few
+percent of the best — which is a different algorithm, not a tuning difference.
+
+The eight bits pack **MSB first**.
+
+### A second analysis window
+
+`Vocoder_AnalyzeSpectrum` runs its own transform before pitch and voicing:
+`Dsp_WindowAndComputeFft(…, PTR_DAT_00020E5C, -7, 0xFF, 0, …, 8, 0)` — **255**
+samples, not the 199 this library uses, through a table at SRAM `0x18000FA8`
+(file `0x064668`): the 128 shorts sitting immediately before the 199-point
+Hamming, so the block is contiguous the way the others were. Peak 28193.
+
+It is monotone edge-to-centre with a smooth bell-shaped first difference, but
+it is **not** a cosine-family window — a 3-term least-squares fit leaves about
+1000 LSB of residual against Hamming, Hann and Blackman forms — and there is an
+unexplained rate break between entries 5 and 6. It is recorded as measured
+rather than named; if it is transcribed it should be as verbatim bytes, which
+is what this project does with every other table anyway.
+
 ### What remains
 
-1. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` is now **764 lines with no
-   `halt_baddata`** — fully readable, and the first real target.
-2. `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, and
-   `Vocoder_SelectSpectralSubbands` `0x0002AA20` for the voicing decision.
+1. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8`, 764 lines and clean.
+2. `Vocoder_AnalyzeSpectrum` `0x000205B8` itself, 747 lines and clean — the
+   band-energy loop at its tail (groups of 5 then 8 bins, scaled by `0x4800`)
+   is the amplitude path.
 3. `Vocoder_RefinePitchEstimate` `0x00025A60` still has one 164-byte gap, at a
    `0b100110`/`0b00100` encoding with the `mfhi`/`mflo` shape — probably
-   `mflos`, a *saturating* accumulator read. That one is left alone on purpose:
-   implementing it means inventing a saturation rule, and unlike the two above
-   there is nothing in the image to check the guess against.
+   `mflos`, a *saturating* accumulator read. Left alone on purpose: it means
+   inventing a saturation rule, and unlike `mthi`/`mtlo` and `mulsa` there is
+   nothing in the image to check the guess against.
+
+So the voicing rule is now evidence rather than a guess, and the pitch
+estimator is the one stage still partly closed.
 
 So the pitch estimator is still partly closed, but the subband analyser is
 open, and this library's own pitch search is the weakest thing in it
