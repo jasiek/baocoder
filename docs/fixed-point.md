@@ -778,29 +778,39 @@ consequence of not having identified it.
 The analyser's voicing and pitch are the two open stages, and the work is now
 specified rather than exploratory.
 
-1. **Write the filterbank**, and the 16-channel stage under it. Both are now
-   fully specified and every table either needs is extracted and asserted.
-   The eight-band loop: eight bands at a 16-int32 stride writing 32 each
-   (50 % overlap-add, exponent-aligned add), two 58-sample sub-frames per band
-   folded through `ambe_subwin_q15`, zero-padded into a 64-point transform,
-   `|X|² × 2` over 32 bins with bins 0 and 1 zeroed, per-band exponents out to
-   the voicing rule. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` runs ahead
-   of it and is read above: fold 32 samples through `ambe_subband_win_q15`,
-   32-point real DFT against `ambe_subband_dft_q15`, `|X|² × 2 >> 7` into 16
-   band energies, then decimate each of the 16 interleaved channels with the
-   7-tap `ambe_subband_fir_q15` to 11 new samples. Its output is a 16 × 49
-   ring, which is why the per-band stride is 98.
-2. **Then the voicing rule drops on top**, already fully read: per band,
+**What is already written.** `src/ambe_subband.c` carries the 16-channel
+stage's window and its transform, both checked in `tests/test_subband.c`
+against a direct DFT (98 cases, worst 1.50 LSB). All five of the stage's tables
+are extracted and asserted. So the remaining work is the two loops around
+those, not any more reading of the image.
+
+1. **Finish `Vocoder_AnalyzeSubbandSpectrum`**: the part not yet written is the
+   loop that slides 32-sample frames along the input, accumulates `|X|² × 2 >> 7`
+   into the 16 band energies, and then decimates each of the 16 interleaved
+   channels with `ambe_subband_fir_q15` — 7 symmetric taps at a stride of 16
+   shorts, `>> 16`, emitting 11 new samples per channel per frame into the
+   16 × 49 ring. `ambe_subband_window` and `ambe_subband_dft32` are the body of
+   that loop and are done.
+2. **Then the eight-band loop** in `Vocoder_AnalyzeSpectrum` itself: eight bands
+   at a 16-int32 stride writing 32 each (50 % overlap-add, exponent-aligned
+   add), two 58-sample sub-frames per band folded through `ambe_subwin_q15`,
+   zero-padded into a 64-point transform, `|X|² × 2` over 32 bins with bins 0
+   and 1 zeroed, per-band exponents out to the voicing rule. It reads the
+   16 × 49 ring, which is why the per-band stride is 98. Note it needs a
+   64-point forward transform: `src/ambe_fft.c` has one in `fft_forward`, but
+   that is `static` and the file's only entry point is `ambe_fft_window`, so
+   this is the one place a small change to an existing module is needed.
+3. **Then the voicing rule drops on top**, already fully read: per band,
    `E_harm/E_total > 0.80` with `pitch` = this library's `f0` (Q19) shifted
    right by two, and a per-band octave alternative above 200 Hz. When it lands,
    `tests/test_encode_voicing.c` stops being a characterisation test and
    becomes a pass/fail one. The success criterion is concrete: the ratio's
    voiced/unvoiced separation should be much greater than the 0.11 measured on
    the current spectrum.
-3. `Vocoder_AnalyzeSpectrum` `0x000205B8` (747 lines, clean) also carries the
+4. `Vocoder_AnalyzeSpectrum` `0x000205B8` (747 lines, clean) also carries the
    amplitude path — the band-energy loop at its tail, groups of 5 then 8 bins
    scaled by `0x4800`.
-4. `Vocoder_RefinePitchEstimate` `0x00025A60` still has one 164-byte gap, at a
+5. `Vocoder_RefinePitchEstimate` `0x00025A60` still has one 164-byte gap, at a
    `0b100110`/`0b00100` encoding with the `mfhi`/`mflo` shape — probably
    `mflos`, a *saturating* accumulator read. Left alone on purpose: it means
    inventing a saturation rule, and unlike `mthi`/`mtlo` and `mulsa` there is
@@ -811,13 +821,19 @@ specified rather than exploratory.
 Pitch remains the weakest measured stage (173/191 within four quantiser steps,
 one octave error) and voicing the worst (48 % against a 67 % trivial baseline).
 
-**Two traps, both of which cost real time.** The tables are nonsense against
+**Three traps, all of which cost real time.** The tables are nonsense against
 `DM32UV_L01_048.bin` — the SRAM image that `BASE = 0x0636C0` maps is the one in
 `DM32_L01_048_20250821.bin`, which is what `tools/extract_tables.py` reads; same
 mapping, different file. And reading the firmware needs the three C-SKY sleigh
 patches in the reverse-engineering project's `docs/patches/`, which are applied
 to the local Ghidra install but must be re-applied after any reinstall — without
-them most of the vocoder decompiles as `halt_baddata`.
+them most of the vocoder decompiles as `halt_baddata`. And Ghidra renders the
+C-SKY `sext rd,rs,15,1` bitfield extract as `(v & 0x7fff) >> 1`, a *logical*
+shift, where the instruction is an arithmetic one — three functions have now
+been hit by this (`Math_Pow2`, and both unpaired samples in
+`Vocoder_SubbandSumDifference`). It is silent on non-negative data, so any
+transcription of a `& 0x7fff) >> 1` needs a test case with negative inputs
+before it can be believed.
 
 ## Still open
 
