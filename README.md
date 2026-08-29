@@ -16,7 +16,7 @@ test against; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 789 422 checks against known-good vectors
+make test     # 799 972 checks against known-good vectors, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -142,6 +142,15 @@ and a pure log-linear law does not fit it either.
 The harmonic-count table is *not* a second gap: `floor(0.4627 / f0)` reproduces
 all 120 entries exactly, which `test_tables` asserts.
 
+The `f0` law is now evaluated with the firmware's own four-term Taylor
+polynomial for 2^x (`Vocoder_PitchFromLog2` `0x0002AD6C`) rather than with
+`pow()`, and that closes the gap to mbelib rather than widening it: **4.8e-5**
+relative against mbelib's table, where an exact `pow()` left 2.4e-3, and all 120
+harmonic counts match. An earlier version of this README recorded a
+one-index divergence at b0 = 17 and attributed it to the firmware; the
+divergence was an artefact of evaluating the firmware's law with an exact
+`pow()`, which the radio does not have. See `docs/fixed-point.md`.
+
 The lead is the frame decoder at `0x0002033C`, which reads the `b0` field and
 takes a per-mode descriptor carrying the field widths; that descriptor is the
 thing to chase.
@@ -169,6 +178,38 @@ The frame geometry falls straight out of `Vocoder_DescrambleVoiceFrame`
 `0x0001893C`, which calls `Vocoder_ComputeParityCodeWord` with 12 parity bits
 for the first 12-bit field and 11 for the second: 12 + 12 + 25 payload bits
 become 24 + 23 + 25 = 72 on-air bits.
+
+## The arithmetic is fixed point, like the radio's
+
+The DM-32UV has no FPU. Its toolchain was configured soft-float and the vocoder
+does not even call that: the DSP path runs ITU-T G.191 style basic operators
+over a hand-rolled block-floating-point package in IRAM whose fifty callers are
+the vocoder. So this library is integer-only too, and `make check-fixedpoint`
+asserts it — `libbaocoder.a` references no libm symbol, links with no `-lm`, and
+contains zero floating-point instructions.
+
+The transcendentals are the radio's own, with coefficients read out of the image
+by `tools/extract_tables.py` from a contiguous block at SRAM
+`0x18001600`–`0x1800182F`:
+
+| Primitive | SRAM | file | measured accuracy |
+|---|---|---|---|
+| `Math_Log2` `0x0001903C` | `0x18001600` | `0x64CC0` | 2.6e-03 abs — a four-term Taylor about 1/√2, not a minimax |
+| `Math_Pow2` `0x000191C0` | `0x1800160C` | `0x64CCC` | 1.2e-04 rel |
+| `Math_Sqrt` `0x00019364` | `0x18001618` | `0x64CD8` | 1.3e-03 rel |
+| `Math_TableInterpLookup` `0x00019000` | `0x18001630` | `0x64CF0` | 6.1e-05 abs — 512-entry **cosine** table, linear interpolation |
+
+`tests/test_basop.c` sweeps each across its whole input domain against libm;
+those are the radio's accuracies, not this implementation's.
+
+What that cost, over 2052 real frames against a double-precision reference: the
+spectral envelope is a factor of thirty coarser (3.7e-04 against float's
+1.3e-05, still inside the Q11 quantiser step of 4.9e-04 that the codec applies
+to it anyway), the harmonic count and every voicing decision stay exact, and the
+synthesised audio is **five decibels better** — 59.5 dB against float's 54.1 —
+because the phase accumulator wraps exactly where a float loses mantissa bits,
+and the overlap-add window's k/50 taps factor out instead of being rounded into
+Q15. `docs/fixed-point.md` has the full comparison and the method.
 
 ## Testing: what "known-good pair" means here
 
@@ -322,7 +363,9 @@ exercised by real data.
 
 * The analyser is a conventional MBE estimator, not the firmware's search, so
   encoded audio is not bit-identical to what the radio would produce from the
-  same input — only the quantiser below it is exact.
+  same input — only the quantiser below it is exact. It is fixed point like the
+  rest of the library, but converted rather than transcribed;
+  `docs/fixed-point.md` lists the stock functions a transcription would need.
 * b1 is not uniquely recoverable when a frame's voicing is degenerate: the
   32-entry table has only 13 distinct 8-band patterns, and bands no harmonic
   maps to are never read.
