@@ -77,6 +77,14 @@ int ambe_cos_q15(int phase_q15turns);
 int ambe_sin_q15(int phase_q15turns);
 
 /*
+ * 0.5*log2(L) for L = 0..56, Q24 - the term the envelope stage adds and the
+ * quantiser subtracts.  A table rather than a call to ambe_log2 because L
+ * takes only 48 values, so this is exact where the radio's four-term Taylor
+ * series would put 2.6e-3 straight onto every spectral amplitude.
+ */
+extern const int32_t ambe_half_log2_q24[57];
+
+/*
  * Leading-zero count, the ff1/LZCOUNT the stock code normalises with.
  * lzcount32(0) is 32.
  */

@@ -138,9 +138,9 @@ int main(void)
             for (l = 1; l <= cur.L; l++) {
                 CHECK(chk.Vl[l] == cur.Vl[l],
                       "trial %d: Vl[%d] %d -> %d\n", trial, l, cur.Vl[l], chk.Vl[l]);
-                CHECK(fabs((double)chk.log2Ml[l] - cur.log2Ml[l]) < 5e-3,
+                CHECK(fabs(t_log2ml(&chk, l) - t_log2ml(&cur, l)) < 5e-3,
                       "trial %d: log2Ml[%d] %.6f -> %.6f\n",
-                      trial, l, cur.log2Ml[l], chk.log2Ml[l]);
+                      trial, l, t_log2ml(&cur, l), t_log2ml(&chk, l));
             }
         }
 
@@ -170,15 +170,12 @@ int main(void)
                  * read at this L, so they cannot be recovered and do not matter.
                  */
                 int pa[8], pb[8], l, used[8];
-                float f0c;
+                int32_t f0c;
                 int Lc;
                 memset(used, 0, sizeof(used));
                 ambe_pitch_from_b0(b[0], 7, &f0c, &Lc);
-                for (l = 1; l <= Lc; l++) {
-                    int jl = (int)((float)l * 16.0f * f0c);
-                    if (jl > 7) jl = 7;
-                    used[jl] = 1;
-                }
+                for (l = 1; l <= Lc; l++)
+                    used[t_band(l, f0c)] = 1;
                 vuv_pattern(b[1], pa);
                 vuv_pattern(einfo.b[1], pb);
                 for (l = 0; l < 8; l++)

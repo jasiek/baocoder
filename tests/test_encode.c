@@ -93,14 +93,14 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out,
             memset(&cinfo, 0, sizeof(cinfo));
             ambe_decode_parms(e, &chk, &prev_copy, &cinfo);
             CHECK(chk.L == cur.L, "frame %d: L %d -> %d\n", n, cur.L, chk.L);
-            CHECK(fabs((double)chk.w0 - cur.w0) < 1e-6,
-                  "frame %d: w0 %.9g -> %.9g\n", n, cur.w0, chk.w0);
+            CHECK(chk.f0 == cur.f0,
+                  "frame %d: f0 %d -> %d\n", n, cur.f0, chk.f0);
             for (l = 1; l <= cur.L; l++) {
                 CHECK(chk.Vl[l] == cur.Vl[l],
                       "frame %d: Vl[%d] %d -> %d\n", n, l, cur.Vl[l], chk.Vl[l]);
-                CHECK(fabs((double)chk.log2Ml[l] - cur.log2Ml[l]) < 1e-3,
+                CHECK(fabs(t_log2ml(&chk, l) - t_log2ml(&cur, l)) < 1e-3,
                       "frame %d: log2Ml[%d] %.6f -> %.6f\n",
-                      n, l, cur.log2Ml[l], chk.log2Ml[l]);
+                      n, l, t_log2ml(&cur, l), t_log2ml(&chk, l));
             }
 
             /* (2) the indices themselves */

@@ -27,7 +27,7 @@ THIRD   := third_party
 MBELIB  := $(THIRD)/mbelib
 SAMPLES := $(THIRD)/known-key-mbe-samples
 
-.PHONY: all test fixtures tables clean distclean
+.PHONY: all test fixtures tables clean distclean check-fixedpoint
 
 all: $(LIB) ambe_decode ambe_encode
 
@@ -55,7 +55,26 @@ test: $(TESTS)
 	  if ./$$t; then :; else fail=1; fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then echo "FAILURES"; exit 1; fi; \
+	$(MAKE) --no-print-directory check-fixedpoint; \
 	echo "all tests passed"
+
+# "Fixed point only" is a claim, so it is checked rather than asserted: the
+# library must contain no floating-point instruction and must link with no
+# libm.  Both are cheap and catch a float creeping back in - a stray double in
+# an intermediate is easy to write and impossible to see in a diff.
+check-fixedpoint: $(LIB)
+	@bad=$$(nm -u $(LIB) 2>/dev/null | awk '{print $$NF}' | \
+	    grep -Ex '_?(cos|sin|tan|exp|exp2|log|log2|log10|sqrt|pow|fmod|floor|ceil|ldexp|frexp|fabs)f?' \
+	    | sort -u); \
+	if [ -n "$$bad" ]; then echo "libm references in $(LIB):"; echo "$$bad"; exit 1; fi
+	@$(CC) $(CFLAGS) $(CPPFLAGS) tools/ambe_decode.c $(LIB) -o .nolibm.tmp || \
+	    { echo "$(LIB) does not link without -lm"; rm -f .nolibm.tmp; exit 1; }
+	@rm -rf .nolibm.tmp .nolibm.tmp.dSYM
+	@if command -v otool >/dev/null 2>&1; then \
+	  n=$$(otool -tv $(LIB) 2>/dev/null | grep -cE '^[[:space:]]+[0-9a-f]+[[:space:]]+(f(add|sub|mul|div|cvt|mov|cmp|neg|abs|sqrt|madd|msub)|scvtf|ucvtf|fcvtz)') || true; \
+	  if [ "$$n" != "0" ]; then echo "$$n floating-point instructions in $(LIB)"; exit 1; fi; \
+	fi
+	@echo "ok   $(LIB) is integer-only: no libm, no floating-point instructions"
 
 # ---------------------------------------------------------------- fixtures
 #
@@ -99,6 +118,7 @@ tables:
 	@echo "regenerated src/ambe_tables_fw.c from $(FIRMWARE)"
 
 clean:
+	rm -rf .nolibm.tmp .nolibm.tmp.dSYM
 	rm -f $(OBJ) $(LIB) ambe_decode ambe_encode tools/mbe_ref tools/dmra_decrypt $(TESTS)
 
 distclean: clean

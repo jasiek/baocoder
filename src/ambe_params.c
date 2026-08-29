@@ -62,27 +62,6 @@
  */
 #define K_0P693_OVER_LN2_Q30 1073513829
 
-/*
- * 0.5*log2(L) for L = 0..56, Q24.
- *
- * A table rather than a call to the radio's Math_Log2, deliberately: L takes
- * 48 distinct values, so this is exact, while Math_Log2 is a four-term Taylor
- * series whose worst-case error is 2.6e-3 (tests/test_basop.c), and this term
- * lands directly on every spectral amplitude in the frame.
- */
-static const int32_t half_log2_L_q24[57] = {
-            0,         0,   8388608,  13295629,  16777216,  19477745,
-     21684237,  23549800,  25165824,  26591258,  27866353,  29019816,
-     30072845,  31041538,  31938408,  32773374,  33554432,  34288123,
-     34979866,  35634199,  36254961,  36845429,  37408424,  37946388,
-     38461453,  38955489,  39430146,  39886887,  40327016,  40751698,
-     41161982,  41558811,  41943040,  42315445,  42676731,  43027545,
-     43368474,  43700062,  44022807,  44337167,  44643569,  44942404,
-     45234037,  45518808,  45797032,  46069003,  46334996,  46595268,
-     46850061,  47099600,  47344097,  47583753,  47818754,  48049279,
-     48275495,  48497560,  48715624
-};
-
 /* Math_SDiv 0x00018D74 semantics, on ints. */
 static int sdiv(int a, int b)
 {
@@ -432,7 +411,7 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         acc += Tl[l];
     Sum42 = (int32_t)(acc / cur->L);
 
-    BigGamma = cur->gamma - half_log2_L_q24[cur->L] - Sum42;
+    BigGamma = cur->gamma - ambe_half_log2_q24[cur->L] - Sum42;
 
     /* ---- amplitudes.  Block floating point: one exponent for the frame. */
     {

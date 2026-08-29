@@ -14,6 +14,39 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/*
+ * The library's parameters are fixed point; these read them back as doubles so
+ * the tests can keep comparing against mbelib's floats and against tolerances
+ * quoted in the units the MBE literature uses.  Only the tests convert - the
+ * library itself never does.
+ */
+static inline double t_f0(const ambe_parms *p)
+{
+    return ldexp((double)p->f0, -AMBE_Q_F0);
+}
+static inline double t_w0(const ambe_parms *p)
+{
+    return ldexp((double)ambe_w0_q24(p), -AMBE_Q_LOG);
+}
+static inline double t_gamma(const ambe_parms *p)
+{
+    return ldexp((double)p->gamma, -AMBE_Q_LOG);
+}
+static inline double t_log2ml(const ambe_parms *p, int l)
+{
+    return ldexp((double)p->log2Ml[l], -AMBE_Q_LOG);
+}
+static inline double t_ml(const ambe_parms *p, int l)
+{
+    return ldexp((double)p->Ml[l], p->Ml_exp - AMBE_Q_ML);
+}
+/* the harmonic-to-band map the codec uses, from a Q19 fundamental */
+static inline int t_band(int l, int32_t f0_q19)
+{
+    int jl = (int)(((int64_t)l * 16 * f0_q19) >> AMBE_Q_F0);
+    return jl > 7 ? 7 : jl;
+}
+
 static int t_fail;
 static int t_checks;
 

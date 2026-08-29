@@ -91,15 +91,15 @@ int main(void)
              * required to be equal.  L is still exact: the one index where the
              * two disagree (b0 = 17) is asserted there.
              */
-            dev(cur.w0, w0, &worst_w0);
-            CHECK(close_enough(cur.w0, w0, 3e-3), "frame %d: w0 %.9g vs %.9g\n",
-                  n, cur.w0, w0);
+            dev(t_w0(&cur), w0, &worst_w0);
+            CHECK(close_enough(t_w0(&cur), w0, 3e-3), "frame %d: w0 %.9g vs %.9g\n",
+                  n, t_w0(&cur), w0);
             if (cur.L != L) {
                 l_mismatch++;
                 CHECK(info.b[0] == 17, "frame %d: L %d vs %d at b0=%d\n",
                       n, cur.L, L, info.b[0]);
             }
-            dev(cur.gamma, gamma, &worst_gamma);
+            dev(t_gamma(&cur), gamma, &worst_gamma);
             for (i = 1; i <= L; i++) {
                 v = strtod(p, &p);
                 CHECK(cur.Vl[i] == (uint8_t)v, "frame %d: Vl[%d] %d vs %d\n",
@@ -107,11 +107,11 @@ int main(void)
             }
             for (i = 1; i <= L; i++) {
                 v = strtod(p, &p);
-                dev(cur.Ml[i], v, &worst_ml);
+                dev(t_ml(&cur, i), v, &worst_ml);
             }
             for (i = 1; i <= L; i++) {
                 v = strtod(p, &p);
-                dev(cur.log2Ml[i], v, &worst_log2ml);
+                dev(t_log2ml(&cur, i), v, &worst_log2ml);
             }
             if (type == AMBE_FRAME_SILENCE) silence++; else voiced++;
             ambe_move_parms(&cur, &prev);

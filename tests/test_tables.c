@@ -141,11 +141,21 @@ int main(void)
      * checks that law against mbelib's tabulated approximation of the same
      * quantiser.
      *
-     * b0 = 17 is a genuine one-index divergence, not slop: mbelib's tabulated
-     * f0 sits just above the L = 11/12 boundary and the firmware's law lands
-     * just below it, so the firmware yields 12 where mbelib's table says 11.
-     * The firmware is the shipping implementation; the exception is asserted
-     * explicitly so it cannot silently become two.
+     * The law now evaluates 2^x with the firmware's own four-term Taylor
+     * polynomial (Vocoder_PitchFromLog2 0x0002AD6C) rather than with pow(),
+     * and that closes the gap to mbelib rather than widening it: f0 agrees to
+     * 4.8e-5 relative where an exact pow() left 2.4e-3, and all 120 harmonic
+     * counts match where the exact version disagreed at b0 = 17.
+     *
+     * That is worth stating plainly, because it is evidence and not just a
+     * tolerance: b0 = 17 sits on the L = 11/12 boundary, an exact pow() lands
+     * one side of it and the radio's polynomial the other, and mbelib's
+     * independently-derived table agrees with the radio.  Two implementations
+     * that share an approximation agree on a boundary case an exact
+     * computation gets wrong - which says the approximation is the one the
+     * codec is specified in terms of, not an artefact of this radio.
+     *
+     * Both figures are asserted so a regression cannot quietly restore them.
      */
     {
         int rn2 = 0, mism = 0;
@@ -156,22 +166,23 @@ int main(void)
               "pitch reference missing or wrong size\n");
         if (w0ref && lref) {
             for (i = 0; i < 120; i++) {
-                float f0;
+                int32_t f0;
                 int Lv;
-                double d;
+                double d, f0d;
                 ambe_pitch_from_b0(i, 7, &f0, &Lv);
-                d = fabs((double)f0 - w0ref[i]) / w0ref[i];
+                f0d = ldexp((double)f0, -AMBE_Q_F0);
+                d = fabs(f0d - w0ref[i]) / w0ref[i];
                 if (d > worst) worst = d;
-                CHECK(d < 3e-3, "f0[%d]: firmware law %.6f vs mbelib %.6f (%.2e)\n",
-                      i, (double)f0, w0ref[i], d);
+                CHECK(d < 1e-4, "f0[%d]: firmware law %.6f vs mbelib %.6f (%.2e)\n",
+                      i, f0d, w0ref[i], d);
                 if (Lv != (int)lref[i]) {
                     mism++;
-                    CHECK(i == 17, "L[%d]: firmware law %d vs mbelib %d\n",
+                    CHECK(0, "L[%d]: firmware law %d vs mbelib %d\n",
                           i, Lv, (int)lref[i]);
                 }
                 CHECK(Lv >= 9 && Lv <= 56, "L[%d] = %d out of range\n", i, Lv);
             }
-            CHECK(mism == 1, "expected exactly 1 L divergence from mbelib, got %d\n",
+            CHECK(mism == 0, "expected no L divergence from mbelib, got %d\n",
                   mism);
             printf("\n    pitch law 120 indices, f0 worst %.2e rel, L %d/120 vs mbelib",
                    worst, 120 - mism);
