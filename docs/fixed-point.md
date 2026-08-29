@@ -689,16 +689,73 @@ Hamming. The best raised-cosine fit is `M = 57`,
 `w = 0.5457 − 0.4543·cos(2πn/57)`, worst residual **360 LSB** (1.1 %), against
 the **1 LSB** the 199-point window matches its Hamming to.
 
-So two of the analyser's three windows are non-analytic, and if they are
-transcribed it should be as verbatim bytes — which is what this project does
-with every table anyway, and why the Hamming identification was always a bonus
-check rather than the mechanism.
+So two of the analyser's three windows are non-analytic. Both are now extracted
+as verbatim bytes — which is what this project does with every table anyway,
+and why the Hamming identification was always a bonus check rather than the
+mechanism. `ambe_subwin_q15` is the 29 half-taps above.
 
 **What is left to write** is the C for the loop above plus its exponent
-bookkeeping, and `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` (764 lines,
-readable) which runs ahead of it. The voicing rule then drops on top and
-`tests/test_encode_voicing.c` becomes a pass/fail check instead of a
-characterisation.
+bookkeeping. What runs ahead of it, `Vocoder_AnalyzeSubbandSpectrum`
+`0x00023AA8`, is no longer a 764-line unknown — it is read below, and its
+tables are extracted.
+
+### What runs ahead of it: a 16-channel filterbank
+
+`Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` produces the 16 × 49 array the
+eight-band loop reads. The array's size is not inferred from the strides: the
+function's state shorts begin at `param_1 + 0x620`, and `0x620` bytes is 784
+shorts is exactly 16 × 49, so the ring ends precisely where the state starts.
+The tail of `Vocoder_AnalyzeSpectrum` then shifts each of the 16 channels down
+by `0x31` = 49 and appends `0xB` = 11 new samples to each.
+
+It is three stages.
+
+**A 32-tap window, folded.** Sample *j* and sample 31−*j* share tap *j* of the
+16-entry table at SRAM `0x18001454`, reached through two separate pointers into
+the same address (`0x000240A8` and `0x00024920`). The window is not analytic —
+the best raised-cosine fit leaves 1309 LSB against a peak of 30913 — but its 32
+taps sum to `524290` = 2^19 + 2, a DC gain of exactly **16** in Q15, one unit
+per output channel. That sum is what identifies it.
+
+**A 32-point real DFT, evaluated directly.** `Vocoder_SubbandSumDifference` is
+not an FFT and does not call one. It folds the 32 windowed samples into 15
+half-sums `(x[j] + x[32−j])/2` and 15 half-differences `(x[j] − x[32−j])/2`,
+then multiplies them by a stored matrix at SRAM `0x180039EC` — 480 int16,
+bounded above by `0x18003DAC`, which is the address the loop tests against.
+The matrix is 15 rows of 16 cosines followed by 16 negated sines:
+
+```
+row k, column j (both 1-based) = sat16(round(32768·cos(2πkj/32)))
+                     and         sat16(round(−32768·sin(2πkj/32)))
+```
+
+and it matches at **0 LSB on all 480 entries**. Bin 0 is the plain sum, written
+before the loop with a zero imaginary part; bins 1..15 are the fifteen rows.
+Sixteen bins, one per channel. This is the one identification in the sub-band
+stage that is exact rather than structural, and it is what says the transform
+is a real DFT rather than something merely transform-shaped.
+
+Each bin's `|X|² × 2` is then shifted right by 7 and accumulated into the 16
+band energies the function returns through `param_3`.
+
+**A 7-tap decimator.** The taps at SRAM `0x18001474` are
+`[−4456, 3034, 19608, 29164, 19608, 3034, −4456]` — symmetric, and summing to
+`65536` exactly, which is unity for the `>> 16` the code applies at
+`0x00024EAA`. They run with a stride of **16 shorts**, i.e. down one channel of
+the 16 interleaved ones, and the outer loop repeats that 16 times. Each pass
+emits the 11 new samples that channel contributes to the frame. The eighth
+short of the block is padding to a word boundary.
+
+So the stage is a conventional uniform DFT filterbank: window, transform,
+decimate. Nothing in it needs a saturation rule or any other guess — the three
+tables and the matrix are all bytes out of the image, extracted by
+`tools/extract_tables.py` and asserted in `tests/test_tables.c`.
+
+One thing that made the 58-tap window hard to find is worth recording. Nothing
+in the image points at `0x18001484`. The code reaches it only through its far
+end, `0x180014BC` (held at `0x00020B3C`), and walks *downwards* until it hits
+`0x18001482` (held at `0x00020B38`) — so the table is stored edge-first, and a
+byte search for its start address finds nothing at all.
 
 ### A second analysis window
 
@@ -711,23 +768,28 @@ Hamming, so the block is contiguous the way the others were. Peak 28193.
 It is monotone edge-to-centre with a smooth bell-shaped first difference, but
 it is **not** a cosine-family window — a 3-term least-squares fit leaves about
 1000 LSB of residual against Hamming, Hann and Blackman forms — and there is an
-unexplained rate break between entries 5 and 6. It is recorded as measured
-rather than named; if it is transcribed it should be as verbatim bytes, which
-is what this project does with every other table anyway.
+unexplained rate break between entries 5 and 6. It is extracted as measured
+rather than named, as `ambe_pitchwin_q15`; the only things `tests/test_tables.c`
+can assert about it are its peak and its monotonicity, which is the honest
+consequence of not having identified it.
 
 ### What remains
 
 The analyser's voicing and pitch are the two open stages, and the work is now
 specified rather than exploratory.
 
-1. **Write the filterbank.** Everything it needs is mapped above: eight bands
-   at a 16-int32 stride writing 32 each (50 % overlap-add, exponent-aligned
-   add), two 58-sample sub-frames per band folded through the 58-tap window at
-   SRAM `0x18001484`, zero-padded into a 64-point transform, `|X|² × 2` over
-   32 bins with bins 0 and 1 zeroed, per-band exponents out to the voicing
-   rule. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` (764 lines, clean) runs
-   ahead of it and produces the 16 channels of 49 samples the loop reads —
-   `param_1` is a 16 × 49 array, which is why the per-band stride is 98.
+1. **Write the filterbank**, and the 16-channel stage under it. Both are now
+   fully specified and every table either needs is extracted and asserted.
+   The eight-band loop: eight bands at a 16-int32 stride writing 32 each
+   (50 % overlap-add, exponent-aligned add), two 58-sample sub-frames per band
+   folded through `ambe_subwin_q15`, zero-padded into a 64-point transform,
+   `|X|² × 2` over 32 bins with bins 0 and 1 zeroed, per-band exponents out to
+   the voicing rule. `Vocoder_AnalyzeSubbandSpectrum` `0x00023AA8` runs ahead
+   of it and is read above: fold 32 samples through `ambe_subband_win_q15`,
+   32-point real DFT against `ambe_subband_dft_q15`, `|X|² × 2 >> 7` into 16
+   band energies, then decimate each of the 16 interleaved channels with the
+   7-tap `ambe_subband_fir_q15` to 11 new samples. Its output is a 16 × 49
+   ring, which is why the per-band stride is 98.
 2. **Then the voicing rule drops on top**, already fully read: per band,
    `E_harm/E_total > 0.80` with `pitch` = this library's `f0` (Q19) shifted
    right by two, and a per-band octave alternative above 200 Hz. When it lands,
@@ -760,7 +822,9 @@ them most of the vocoder decompiles as `halt_baddata`.
 ## Still open
 
 Beyond the analyser: nothing. Every table the decoder reads and every
-transcendental it evaluates now comes out of the firmware image.
+transcendental it evaluates now comes out of the firmware image, and that now
+includes every table the analyser's two filterbanks read as well — the code
+that consumes them is what is missing, not the data.
 
 ## Reproducing
 
