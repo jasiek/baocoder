@@ -45,6 +45,7 @@
  */
 #include "ambe_subband.h"
 #include "ambe_basop.h"
+#include "ambe_fft.h"
 #include "ambe_tables.h"
 
 /*
@@ -270,4 +271,85 @@ void ambe_subband_decimate(int16_t *out, const int16_t *sets, int chan,
                    sets[chan + 16 * (2 * i + t)];
         out[i] = (int16_t)(acc >> 16);
     }
+}
+
+/*
+ * ---- the eight-band loop ------------------------------------------------
+ *
+ * Vocoder_AnalyzeSpectrum 0x000205B8 builds a 128-entry spectrum from eight
+ * bands of two channels each, writing 32 entries per band at a stride of 16 so
+ * neighbouring bands overlap by half.  8 x 16 = 128 is exactly the array
+ * Vocoder_SelectSpectralSubbands reads.
+ *
+ * That a band is two *channels* rather than two time segments is what the
+ * strides say: the ring pointer advances 49 within a band and 98 between them,
+ * and 98 = 2 x 49.  Eight bands of two channels is the sixteen the stage above
+ * produces.
+ */
+
+/*
+ * The 58-tap window is applied folded, and the table is stored edge-first
+ * because the stock code reaches it only through its far end (0x180014BC) and
+ * walks downwards.  So seg[j] and seg[57-j] share tap j, the centre pair
+ * seg[28]/seg[29] taking the peak.
+ */
+short ambe_band_spectrum(int32_t magsq[32], const int16_t seg[58], short exp)
+{
+    int32_t buf[AMBE_BAND_NFFT / 2];
+    int16_t *slot = (int16_t *)buf;
+    short e;
+    int j;
+
+    for (j = 0; j < 29; j++) {
+        int32_t w = ambe_subwin_q15[j];
+        slot[j]      = (int16_t)((w * (int32_t)seg[j]      + 0x4000) >> 15);
+        slot[57 - j] = (int16_t)((w * (int32_t)seg[57 - j] + 0x4000) >> 15);
+    }
+    /* Dsp_FillShortArray(..., 0, 6): the zero pad from 58 up to 64 */
+    for (j = 58; j < AMBE_BAND_NFFT; j++)
+        slot[j] = 0;
+
+    e = ambe_fft_forward(buf, exp, 6, 0);
+    e = (short)(e * 2);                    /* the spectrum is squared below */
+
+    for (j = 0; j < AMBE_BAND_BINS; j++) {
+        int32_t re = (int32_t)(int16_t)(buf[j] & 0xffff);
+        int32_t im = (int32_t)(int16_t)((uint32_t)buf[j] >> 16);
+        magsq[j] = (re * re + im * im) * 2;
+    }
+    /* the stock code drops DC and the first bin outright */
+    magsq[0] = 0;
+    magsq[1] = 0;
+    return e;
+}
+
+/*
+ * The exponent-aligned add.  Block floats here are mantissa * 2^exp - see
+ * normalize_array in ambe_fft.c, which shifts data left and decrements the
+ * exponent - so aligning means keeping the operand with the *larger* exponent
+ * and shifting the other's mantissas right by the difference.  The result
+ * carries the larger exponent.
+ */
+short ambe_band_add(int32_t dst[32], const int32_t a[32], short ea,
+                    const int32_t b[32], short eb)
+{
+    const int32_t *keep = a, *shift = b;
+    int d = (int)ea - (int)eb;
+    short e = ea;
+    int j;
+
+    if (d < 0) {
+        d = -d;
+        keep = b;
+        shift = a;
+        e = eb;
+    }
+    if (d > 31) {
+        for (j = 0; j < AMBE_BAND_BINS; j++)
+            dst[j] = keep[j];
+        return e;
+    }
+    for (j = 0; j < AMBE_BAND_BINS; j++)
+        dst[j] = (shift[j] >> d) + keep[j];
+    return e;
 }

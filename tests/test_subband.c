@@ -356,6 +356,175 @@ int main(void)
                "peak %d of %d", worst_count, AMBE_SUBBAND_MAX_OUT);
     }
 
+    /*
+     * The eight-band loop's per-channel spectrum: the 58-tap window folded,
+     * zero-padded to 64, transformed, squared.  Checked the way test_fft.c
+     * checks the big transform - a block-float spectrum is right when its dB
+     * offset against a reference is a *constant*, since the common scale is
+     * arbitrary - and separately that the fold really is symmetric, which a
+     * magnitude test cannot see.
+     */
+    {
+        int16_t seg[58];
+        int32_t magsq[32];
+        double worst = 0.0;
+        int trial, j, k;
+        uint32_t s3 = 31u;
+
+        for (trial = 0; trial < 8; trial++) {
+            double w[64], d[32], mean = 0.0, spread = 0.0, ref[32];
+            int n = 0, rk = 2, pk = 2;
+
+            for (j = 0; j < 58; j++) {
+                double v = 9000.0 * sin(2.0 * M_PI * (0.06 + 0.05 * trial) * j)
+                         + 2500.0 * cos(2.0 * M_PI * 0.21 * j + 0.4);
+                s3 = s3 * 1103515245u + 12345u;
+                v += 250.0 * (((double)((s3 >> 16) & 0x7fff) / 16384.0) - 1.0);
+                seg[j] = (int16_t)v;
+            }
+
+            /* the reference applies the same folded window, then a plain DFT */
+            for (j = 0; j < 64; j++) w[j] = 0.0;
+            for (j = 0; j < 29; j++) {
+                double t = ambe_subwin_q15[j] / 32768.0;
+                w[j]      = seg[j] * t;
+                w[57 - j] = seg[57 - j] * t;
+            }
+            for (k = 0; k < 32; k++) {
+                double re = 0.0, im = 0.0;
+                for (j = 0; j < 64; j++) {
+                    double a = 2.0 * M_PI * (double)k * (double)j / 64.0;
+                    re += w[j] * cos(a);
+                    im -= w[j] * sin(a);
+                }
+                ref[k] = re * re + im * im;
+            }
+
+            ambe_band_spectrum(magsq, seg, 0);
+
+            CHECK(magsq[0] == 0 && magsq[1] == 0,
+                  "bins 0 and 1 are %d and %d, the stock code zeroes both\n",
+                  magsq[0], magsq[1]);
+
+            for (k = 3; k < 32; k++) {
+                if (ref[k] > ref[rk]) rk = k;
+                if (magsq[k] > magsq[pk]) pk = k;
+            }
+            CHECK(pk == rk, "band trial %d: peak bin %d, reference says %d\n",
+                  trial, pk, rk);
+            for (k = 2; k < 32; k++) {
+                if (ref[k] < ref[rk] * 1e-4) continue;
+                d[n++] = 10.0 * log10((double)magsq[k] + 1.0)
+                       - 10.0 * log10(ref[k] + 1.0);
+            }
+            CHECK(n >= 3, "band trial %d: only %d usable bins\n", trial, n);
+            for (k = 0; k < n; k++) mean += d[k];
+            mean /= (n ? n : 1);
+            for (k = 0; k < n; k++) {
+                double e2 = d[k] - mean;
+                if (e2 < 0.0) e2 = -e2;
+                if (e2 > spread) spread = e2;
+            }
+            if (spread > worst) worst = spread;
+            CHECK(spread < 1.5,
+                  "band trial %d: dB offset varies by %.2f (mean %.2f)\n",
+                  trial, spread, mean);
+        }
+        printf("\n    band      58-tap window into 64-pt, dB offset "
+               "constant to %.2f dB", worst);
+
+        /*
+         * The fold, which the dB-offset test above cannot see: it would pass
+         * just as well if seg[j] and seg[57-j] took different taps.
+         *
+         * Reversing the segment must leave the magnitude spectrum alone.  For
+         * a real sequence, reversal conjugates the transform and multiplies it
+         * by a unit phase, so |X| is unchanged - and it holds here despite the
+         * zero padding, because the pad sits at 58..63 in both cases.  If the
+         * fold were wrong the two windowed sequences would not be reversals of
+         * each other and the magnitudes would differ grossly.
+         *
+         * The bar is 3% of the peak rather than equality, and that is measured
+         * rather than chosen: the windowed integers are exact reversals, but
+         * the transform rounds through five butterfly stages and rounding is
+         * not reversal-invariant, which costs 1.6% on the peak bin here.
+         * Asserting equality would be asserting that a fixed-point FFT is
+         * exact.  The bar is still load-bearing - giving seg[57-j] the tap
+         * ambe_subwin_q15[28-j] instead of [j], the plausible way to get the
+         * fold wrong, moves the peak bin by 56% - that was checked, not assumed.
+         */
+        {
+            int32_t m1[32], m2[32];
+            int16_t rev[58];
+            double wf = 0.0;
+            for (j = 0; j < 58; j++) seg[j] = (int16_t)(1000 + 37 * j);
+            for (j = 0; j < 58; j++) rev[j] = seg[57 - j];
+            ambe_band_spectrum(m1, seg, 0);
+            ambe_band_spectrum(m2, rev, 0);
+            {
+                double peak = 1.0;
+                for (k = 2; k < 32; k++)
+                    if ((double)m1[k] > peak) peak = (double)m1[k];
+                for (k = 2; k < 32; k++) {
+                    double d2 = fabs((double)m1[k] - (double)m2[k]) / peak;
+                    if (d2 > wf) wf = d2;
+                    CHECK(d2 < 0.03,
+                          "reversing the segment moved bin %d by %.2f%% of "
+                          "the peak (%d vs %d) - the fold is not symmetric\n",
+                          k, 100.0 * d2, m1[k], m2[k]);
+                }
+            }
+            printf("\n              fold symmetric under reversal to %.2f%% "
+                   "of peak", 100.0 * wf);
+        }
+    }
+
+    /*
+     * The exponent-aligned add.  What must hold is that it adds the two
+     * *values*, not the two mantissas: block floats here are mantissa * 2^exp,
+     * so the operand with the larger exponent is kept and the other shifted
+     * right.  Getting the sense backwards still produces a plausible spectrum,
+     * just one where the quieter channel drowns the louder.
+     */
+    {
+        int32_t a[32], b[32], out[32];
+        int ea, eb, k;
+        double worst = 0.0;
+        uint32_t s4 = 5u;
+
+        for (k = 0; k < 32; k++) {
+            s4 = s4 * 1103515245u + 12345u;
+            a[k] = (int32_t)((s4 >> 8) & 0x00ffffff);
+            s4 = s4 * 1103515245u + 12345u;
+            b[k] = (int32_t)((s4 >> 8) & 0x00ffffff);
+        }
+        for (ea = -4; ea <= 4; ea++) {
+            for (eb = -4; eb <= 4; eb++) {
+                short e = ambe_band_add(out, a, (short)ea, b, (short)eb);
+                CHECK(e == (short)(ea > eb ? ea : eb),
+                      "add(%d,%d) returned exponent %d\n", ea, eb, e);
+                for (k = 0; k < 32; k++) {
+                    double want = a[k] * pow(2.0, ea) + b[k] * pow(2.0, eb);
+                    double got  = out[k] * pow(2.0, e);
+                    double rel  = fabs(got - want) / (fabs(want) + 1.0);
+                    if (rel > worst) worst = rel;
+                    /*
+                     * The stock shift truncates, so up to 2^d is lost from
+                     * mantissas of order 2^24 - about 1e-5 at the widest
+                     * alignment here.  The tolerance is set by that, not
+                     * chosen: a swapped sense would miss by orders of
+                     * magnitude, which is what this is here to catch.
+                     */
+                    CHECK(rel < 1e-4,
+                          "add(%d,%d) bin %d: %.1f, want %.1f\n",
+                          ea, eb, k, got, want);
+                }
+            }
+        }
+        printf("\n              exponent-aligned add exact to %.1e relative",
+               worst);
+    }
+
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
            2 * 15 + 4 + 64, worst_abs);
     printf("\n                         ");

@@ -68,4 +68,36 @@ void ambe_subband_magnitudes(int16_t out[16], const int16_t bins[32],
  */
 int ambe_subband_advance(int16_t *acc, int nframe, int *nsamp, int *offset);
 
+
+/* ---- the eight-band loop in Vocoder_AnalyzeSpectrum 0x000205B8 -----------
+ *
+ * Eight bands, each built from two adjacent channels of the 16 x 49 ring.
+ * Each channel contributes a 58-sample segment, and the two spectra are
+ * combined, then written into a 128-entry spectrum at a stride of 16 - so
+ * adjacent bands overlap by half.
+ */
+
+#define AMBE_BAND_SEG   58   /* samples per channel segment  */
+#define AMBE_BAND_NFFT  64   /* zero-padded transform size   */
+#define AMBE_BAND_BINS  32   /* squared magnitudes it yields */
+#define AMBE_BANDS       8
+#define AMBE_BAND_STRIDE 16  /* 8 x 16 = the 128 the voicing rule reads */
+
+/*
+ * One channel's segment to 32 squared magnitudes: the 58-tap window folded,
+ * zero-padded into a 64-point transform, |X|^2 * 2, with bins 0 and 1 zeroed
+ * as the stock code does.  `exp` is the segment's block-float exponent
+ * (value = mantissa * 2^exp); the returned exponent is the spectrum's.
+ */
+short ambe_band_spectrum(int32_t magsq[32], const int16_t seg[58], short exp);
+
+/*
+ * Add two 32-entry spectra that carry their own exponents, as the stock code
+ * does it: align to the larger exponent, shift the other's mantissas right by
+ * the difference, and return the exponent of the result.  `dst` may alias
+ * either input.
+ */
+short ambe_band_add(int32_t dst[32], const int32_t a[32], short ea,
+                    const int32_t b[32], short eb);
+
 #endif /* AMBE_SUBBAND_H */

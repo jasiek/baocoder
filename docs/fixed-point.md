@@ -926,16 +926,22 @@ asserted.
    than itself. What is left is to wire them into the loop the stock function
    runs them in, and to hold the whole stage against the firmware; the pieces
    themselves need no more reading of the image.
-2. **Then the eight-band loop** in `Vocoder_AnalyzeSpectrum` itself: eight bands
-   at a 16-int32 stride writing 32 each (50 % overlap-add, exponent-aligned
-   add), two 58-sample sub-frames per band folded through `ambe_subwin_q15`,
-   zero-padded into a 64-point transform, `|X|² × 2` over 32 bins with bins 0
-   and 1 zeroed, per-band exponents out to the voicing rule. It reads the
-   16 × 49 ring, which is why the per-band stride is 98. The 64-point transform
-   it needs is ready: `ambe_fft_forward` is now a public entry point, and
-   `tests/test_fft.c` exercises it at 64 points as well as 256 — a different
-   path (one fewer radix-2 stage, the N = 32 bit-reversal table, a shallower
-   unpack), which until now was never tested at all.
+2. **The eight-band loop**, of which the two self-contained pieces are written
+   and tested: `ambe_band_spectrum` (the 58-tap window folded, zero-padded into
+   the 64-point transform, `|X|² × 2` over 32 bins with bins 0 and 1 zeroed —
+   dB offset constant to 0.35 dB against a reference DFT, and the fold checked
+   by segment reversal) and `ambe_band_add` (the exponent-aligned add, exact to
+   1e-6 relative).
+
+   What is left is the **segment-exponent bookkeeping**, and this is the one
+   place left in the analyser where reading is still needed. The 58 samples a
+   channel contributes are not one block: they span several past frames, each
+   normalised with its own exponent, and the loop at `0x00020894` walks seven
+   segments — boundaries at `param_1 + 0x62E..0x63A`, exponents at
+   `param_1 + 0x310` — shifting each down to the common maximum that
+   `Math_ArrayMax(param_1 + 0x310, 7)` picks. That state is maintained by
+   `Vocoder_AnalyzeSubbandSpectrum`'s prologue (the `0x620..0x63A` shuffle),
+   so the two stages have to be read together rather than separately.
 3. **The voicing rule** is fully read — per band, `E_harm/E_total > 0.80` with
    `pitch` = this library's `f0` (Q19) shifted right by two, and a per-band
    octave alternative above 200 Hz — but **do not expect it to fix voicing**,
