@@ -742,12 +742,67 @@ rescued by resolution or by a better decision rule — which stands, and is why
 the shipped estimator loses to always-voiced. They establish nothing about the
 firmware's feature, which was never tested.
 
-Whether envelope periodicity separates voicing on the real corpus is now a
-cheap question, because the stage that computes it exists: run the captures
-through `ambe_subband_process` and `ambe_band_analyse` and score the result the
-way `tools/proto_voicing.py` scores the current one. That is the next
-experiment, and it is the one that should decide whether the analyser's voicing
-can be fixed at all.
+### Envelope periodicity, measured — and it works
+
+That experiment has now been run, by `tools/env_voicing.c` over the same 8936
+bands with the same scoring. **The filterbank's feature does what the library's
+never could.**
+
+| feature | separation | AUC | baseline | best accuracy |
+|---|---|---|---|---|
+| speech spectrum, the library's | +0.069 … +0.150 | 0.615–0.660 | 0.672 | **0.672** — never beats it |
+| **envelope periodicity, the radio's** | **+0.217** | **0.762** | 0.673 | **0.704** |
+
+A single global threshold on envelope periodicity beats always-voiced. Nothing
+built on the speech spectrum did, at any window length or with any decision
+rule tried.
+
+The per-band split says the same thing far more sharply, because it is exactly
+the bands where the old feature was at chance that the new one recovers:
+
+| band | % voiced | AUC, speech spectrum | AUC, envelope | best acc | gain |
+|---|---|---|---|---|---|
+| 1 | 92.7 | 0.646 | 0.650 | 0.927 | +0.000 |
+| 2 | 78.0 | 0.584 | 0.618 | 0.781 | +0.001 |
+| 3 | 62.7 | 0.534 | **0.712** | 0.665 | +0.038 |
+| 4 | 63.7 | **0.494** | **0.750** | 0.695 | +0.058 |
+| 5 | 52.8 | **0.509** | **0.731** | 0.693 | +0.165 |
+| 6 | 47.1 | **0.502** | **0.740** | 0.711 | +0.182 |
+| 7 | 41.2 | **0.489** | **0.716** | 0.723 | +0.135 |
+
+Bands 4–7 carry a prior near 50 %, so they are where a decision actually pays
+and where the shipped estimator's failure lives. The speech-spectrum feature is
+at chance in every one of them. The envelope feature is at AUC 0.72–0.75.
+
+Scored end to end on the same bands:
+
+| decision | accuracy |
+|---|---|
+| the shipped estimator | 0.480 |
+| always voiced | 0.672 |
+| per-band prior alone, ignoring the audio | 0.702 |
+| **envelope, one global threshold** | **0.704** |
+| **per-band priors + envelope** | **0.774** |
+
+So the earlier conclusion — "getting past 0.672 needs a different feature" —
+was right about the diagnosis and wrong about the prospects. The different
+feature is the radio's own, it is now computed by code in this tree, and it is
+worth about **29 points over the shipped estimator** and 10 over the trivial
+answer with a single constant. The per-band figure fits eight thresholds to
+this corpus and should be treated as an upper reference; the global one fits
+a single parameter and is the safe claim.
+
+**What to do with it.** The analyser's voicing should be rebuilt on
+`ambe_band_analyse`'s spectrum rather than on the 256-point speech transform:
+per band, the fraction of envelope-modulation energy on the pitch's harmonic
+grid, thresholded once. `tests/test_encode_voicing.c` can then stop being a
+characterisation test.
+
+Two limits worth carrying. The pitch used here is the transmitted one, so this
+measures the feature and not the pitch estimator that would have to supply it;
+and the bin scale is the measured `f0 / 15.625` rather than the firmware's own
+`step = pitch * 128`, which needs the Q-format chain confirming before a
+bit-exact port.
 
 ### Two controls, one of which corrects the sweep above
 
@@ -1003,14 +1058,15 @@ asserted.
    at chance (AUC 0.489–0.509). Resolution is not the bottleneck. The section
    "Resolution is not the bottleneck — measured" has the numbers.
 
-   Nor is there a cheap win in the decision rule, which was the next guess and
-   was also measured. `ambe_encode_params.c` already picks the best-matching
-   codebook pattern; retuning the upstream threshold from 0.60 to 0.40 is worth
-   about 12 points and still lands below always-voiced, and soft pattern
-   scoring and per-frame normalisation both came out worse. **No rule driven by
-   this feature beats answering "voiced".** Getting past that needs a different
-   feature, and nothing currently in hand suggests one — so this item is open
-   research, not a task.
+   No rule driven by the *library's* feature beats answering "voiced" — that
+   was measured too, including retuning the threshold (worth 12 points, still
+   below trivial), soft codebook scoring and per-frame normalisation. But the
+   radio's feature is a different quantity, it is now computed by
+   `ambe_band_analyse`, and it **does** beat the trivial answer: AUC 0.762
+   against 0.615, and 0.704 accuracy against a 0.673 baseline with one
+   threshold. So this is a task after all, and the highest-value one on the
+   list: rebuild the voicing decision on the envelope spectrum. See "Envelope
+   periodicity, measured".
 4. `Vocoder_AnalyzeSpectrum` `0x000205B8` (747 lines, clean) also carries the
    amplitude path — the band-energy loop at its tail, groups of 5 then 8 bins
    scaled by `0x4800`.

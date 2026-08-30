@@ -25,10 +25,13 @@
  * bands where a decision would pay, whatever the resolution.  What the same run
  * Nor does a better decision rule: retuning the threshold is worth about 12
  * points and still lands below always-voiced, and soft scoring over the 16
- * codebook patterns came out worse.  The measure is sound in isolation - on
- * synthetic signals it separates by +0.41 to +0.70 - so what is missing is in
- * the signal.  Getting past the trivial answer needs a different feature.
- * docs/fixed-point.md, "Resolution is not the bottleneck", has the tables.
+ * codebook patterns came out worse.  Getting past the trivial answer needs a
+ * different feature - and there now is one.  The radio's filterbank measures
+ * envelope periodicity rather than spectral harmonic concentration;
+ * src/ambe_subband.c computes it and tools/env_voicing.c scores it at AUC
+ * 0.762 against 0.615 here, beating always-voiced outright.  Rebuilding the
+ * decision on that is what turns this into a pass/fail test.
+ * docs/fixed-point.md, "Envelope periodicity, measured", has the tables.
  *
  * SPDX-License-Identifier: ISC
  */

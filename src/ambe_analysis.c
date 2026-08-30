@@ -113,8 +113,20 @@
  * The measure itself is not at fault: on synthetic signals - pure harmonics
  * against an unvoiced mix built the way ambe_synth.c builds one - the same code
  * separates by +0.41 to +0.70.  On real decoded speech it recovers a quarter of
- * that.  What is missing is in the signal.  docs/fixed-point.md, "Resolution is
- * not the bottleneck", carries all of it.
+ * that.  What is missing is in the signal this measure is fed.
+ *
+ * And that is now fixable, which the earlier note here denied.  The radio does
+ * not measure this quantity at all: its filterbank's channel signals are
+ * magnitudes, so its eight-band loop transforms *envelopes* and its voicing
+ * rule asks how periodic each band's envelope is.  src/ambe_subband.c computes
+ * that now, and tools/env_voicing.c scores it over the same corpus: AUC 0.762
+ * against this measure's 0.615, and 0.704 accuracy against a 0.673 baseline -
+ * the first thing measured in this project that beats answering "voiced".  In
+ * bands 4-7, where the prior is near 50% and this estimator's failure lives,
+ * it runs at AUC 0.72-0.75 where this one sits at chance.
+ *
+ * So the fix is to rebuild this decision on ambe_band_analyse's spectrum.
+ * docs/fixed-point.md, "Envelope periodicity, measured", carries the tables.
  */
 #ifndef VOICE_NUM
 #define VOICE_NUM 60
