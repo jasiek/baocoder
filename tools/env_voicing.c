@@ -38,7 +38,8 @@
 #define BINHZ (1000.0/64.0)     /* channel rate 1000 Hz, 64-point transform */
 
 int main(int argc,char**argv){
-    if(argc<3){fprintf(stderr,"usage: %s <base.pcm> <base.meta>\n",argv[0]);return 2;}
+    if(argc<3){fprintf(stderr,"usage: %s <base.pcm> <base.meta> [pitch-error-in-percent]\n",argv[0]);return 2;}
+    double perr = (argc>3)?atof(argv[3])/100.0:0.0;
     FILE*fp=fopen(argv[1],"rb"); FILE*fm=fopen(argv[2],"r");
     if(!fp||!fm){fprintf(stderr,"open failed\n");return 1;}
     fseek(fp,0,SEEK_END); long ns=ftell(fp)/2; fseek(fp,0,SEEK_SET);
@@ -67,7 +68,7 @@ int main(int argc,char**argv){
                 int16_t seg[AMBE_BAND_SEG];
                 int32_t a[32],b[32],band[32];
                 if(b1>=0){
-                    double f0=(double)f0q/(double)(1L<<19);       /* turns/sample */
+                    double f0=(double)f0q/(double)(1L<<19)*(1.0+perr); /* turns/sample */
                     double fund = f0*8000.0/BINHZ;                /* bins */
                     printf("%d %d %.4f",idx,b1,fund);
                     for(int bd=0;bd<8;bd++){

@@ -792,11 +792,47 @@ answer with a single constant. The per-band figure fits eight thresholds to
 this corpus and should be treated as an upper reference; the global one fits
 a single parameter and is the safe claim.
 
-**What to do with it.** The analyser's voicing should be rebuilt on
-`ambe_band_analyse`'s spectrum rather than on the 256-point speech transform:
-per band, the fraction of envelope-modulation energy on the pitch's harmonic
-grid, thresholded once. `tests/test_encode_voicing.c` can then stop being a
-characterisation test.
+### It is in, and the test is pass/fail now
+
+The analyser decides on it. `ambe_analyse_v` drives the sub-band stage two
+80-sample calls per frame, exactly as `Vocoder_ProcessFrameFec` does, and the
+voicing rule reads `ambe_band_analyse`'s per-band spectra: the fraction of
+envelope-modulation energy on the pitch's harmonic grid, thresholded once at
+0.56. In the encoder, on its own pitch estimate:
+
+| | before | after |
+|---|---|---|
+| bands correct | 48.04 % | **71.99 %** |
+| always-voiced baseline | 67.26 % | 67.26 % |
+| exact 8-bit pattern | 5.5 % | **22.3 %** |
+
+So the estimator beats the trivial answer for the first time, by 4.7 points,
+and quadruples the whole-pattern rate. `tests/test_encode_voicing.c` asserts
+`bandhit > refvoiced` now instead of pinning a floor under a known defect.
+
+Two things that came out of landing it, both worth carrying:
+
+**The threshold sits on a plateau, not a knife edge.** 0.55–0.65 all score
+about 0.70 offline, which is what the old rule never had — its best value was
+the edge of a cliff.
+
+**Voicing and amplitude are coupled, and the coupling bit.** An unvoiced
+harmonic is divided by 0.2046 at the amplitude step, so changing how many bands
+come back unvoiced changes the frame's gain. The old rule called almost
+everything unvoiced; the envelope rule calls a realistic mix, and the
+round-trip level fell 3.6 dB until `AMBE_ML_SCALE_Q16` was re-swept from 30000
+to 12500. It is back at ×1.00. `tests/test_encode_pcm.c` has to be re-run
+alongside any change to this decision.
+
+**And a wiring bug worth recording**, because it looked like a limitation of
+the feature rather than a mistake. The first integration committed only the
+first of the two 80-sample halves to the ring, so half the decimated data was
+dropped every frame; that scored 57.6 %, and the obvious explanation — that the
+analyser's own pitch is worse than the transmitted one the offline experiment
+used — was wrong. Measuring the feature's pitch sensitivity is what ruled it
+out: ±10 % of pitch error costs only 0.03 AUC, far too little to explain the
+gap. The commit has to happen after the voicing decision, which is exactly
+where `Vocoder_AnalyzeSpectrum`'s tail does it.
 
 Two limits worth carrying. The pitch used here is the transmitted one, so this
 measures the feature and not the pitch estimator that would have to supply it;

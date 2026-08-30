@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ambe.h"
+#include "ambe_analysis_int.h"
 
 struct ambe_encoder {
     ambe_analysis an;
+    ambe_voicing  vc;
     ambe_parms    cur;
     ambe_parms    prev;
     ambe_parms    prev_enh;
@@ -33,6 +35,8 @@ void ambe_encoder_destroy(ambe_encoder *e) { free(e); }
 void ambe_encoder_reset(ambe_encoder *e)
 {
     memset(&e->an, 0, sizeof(e->an));
+    memset(&e->vc, 0, sizeof(e->vc));
+    ambe_subband_init(&e->vc.sb);
     ambe_init_parms(&e->cur, &e->prev, &e->prev_enh);
 }
 
@@ -55,7 +59,7 @@ int ambe_encode_bits(ambe_encoder *e, const int16_t pcm[AMBE_PCM_SAMPLES],
         return 0;
     }
 
-    ambe_analyse(&e->an, pcm, &e->cur);
+    ambe_analyse_v(&e->an, &e->vc, pcm, &e->cur);
     ambe_encode_parms(&e->cur, &e->prev, ambe_d, info);
     ambe_move_parms(&e->cur, &e->prev);
     return 0;

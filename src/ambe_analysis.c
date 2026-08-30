@@ -51,6 +51,7 @@
 #include "ambe_basop.h"
 #include "ambe_fft.h"
 #include "ambe_tables.h"
+#include "ambe_analysis_int.h"
 
 #define NFFT 256
 #define PITCH_MIN 20        /* f0 = 0.0500 */
@@ -69,8 +70,17 @@
  * anything from 28000 to 31846 lands on it.
  */
 #ifndef AMBE_ML_SCALE_Q16
-#define AMBE_ML_SCALE_Q16 30000       /* 0.4578 in Q16 */
+#define AMBE_ML_SCALE_Q16 12500       /* 0.1907 in Q16 */
 #endif
+
+/*
+ * It was 30000 while the voicing rule was the spectral one, and it moved
+ * because voicing and amplitude are coupled: an unvoiced harmonic is divided
+ * by 0.2046 at the amplitude step below, so changing how many bands come back
+ * unvoiced changes the frame's gain.  The old rule called almost everything
+ * unvoiced; the envelope rule calls a realistic mix, which cost 3.6 dB until
+ * this was re-swept.  12500 puts the round-trip level back at x1.00.
+ */
 
 /* ln2 / 0.693, undoing the truncated ln2 the decoder's amplitude step uses */
 #define K_LN2_OVER_0P693_Q30 1074765414
@@ -162,8 +172,80 @@ static ambe_bf ncc(const int16_t *x, int len, int lag)
                                                 ambe_bf_from_i64(e1, 0))));
 }
 
+/*
+ * The envelope-voicing rule, which is the radio's rather than this library's.
+ *
+ * The eight-band loop's spectrum is not a speech spectrum: its channel signals
+ * are magnitudes, so it measures how periodically each band's *envelope* varies
+ * - at 1000/64 = 15.625 Hz per bin - and a voiced band modulates at the
+ * fundamental.  Per band this asks what fraction of that energy sits on the
+ * pitch's harmonic grid, which is the same shape as the spectral rule below
+ * and a different quantity.
+ *
+ * Measured over the corpus by tools/env_voicing.c: AUC 0.762 against the
+ * spectral rule's 0.615, and it is the only decision measured in this project
+ * that beats answering "voiced" - 0.704 against a 0.673 baseline.  In bands
+ * 4-7, where the prior is near 50% and the spectral rule sits at chance, this
+ * runs at AUC 0.72-0.75.
+ *
+ * The fundamental in bins is f0 * 8000 / 15.625 = f0 * 512, and f0 is Q19
+ * turns, so the Q16 bin position is just f0 << 6 - exact, no rounding.
+ */
+#define ENV_VOICE_NUM 56    /* the threshold, 0.56; see below */
+#define ENV_VOICE_DEN 100
+
+static void envelope_voicing(ambe_voicing *v, int32_t f0, int voiced[8])
+{
+    int32_t spec[128];
+    short   bexp[8];
+    int32_t fund_q16 = f0 << 6;
+    int bd;
+
+    for (bd = 0; bd < 8; bd++)
+        voiced[bd] = 1;
+    if (fund_q16 < (2 << 16) || !ambe_band_analyse(&v->sb, spec, bexp))
+        return;
+
+    for (bd = 0; bd < 8; bd++) {
+        int16_t seg[AMBE_BAND_SEG];
+        int32_t a32[32], b32[32], band[32];
+        int64_t tot = 0, harm = 0;
+        short ea, eb;
+        int k, h;
+
+        if (!ambe_subband_segment(&v->sb, 2 * bd, seg))
+            return;
+        ea = ambe_band_spectrum(a32, seg, 0);
+        if (!ambe_subband_segment(&v->sb, 2 * bd + 1, seg))
+            return;
+        eb = ambe_band_spectrum(b32, seg, 0);
+        ambe_band_add(band, a32, ea, b32, eb);
+
+        for (k = 2; k < 32; k++)
+            tot += band[k];
+        for (h = 1; (int64_t)h * fund_q16 < (32LL << 16); h++) {
+            int32_t c = (int32_t)(h * fund_q16);
+            for (k = 2; k < 32; k++) {
+                int32_t d = (k << 16) - c;
+                if (d < 0) d = -d;
+                if (d <= fund_q16 / 4)
+                    harm += band[k];
+            }
+        }
+        /* cross-multiplied, so the threshold is exact rather than rounded */
+        voiced[bd] = tot > 0 &&
+                     harm * ENV_VOICE_DEN > tot * (int64_t)ENV_VOICE_NUM;
+    }
+}
+
 void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
                   ambe_parms *out)
+{
+    ambe_analyse_v(a, NULL, pcm, out);
+}
+
+void ambe_analyse_v(ambe_analysis *a, ambe_voicing *v,
+                    const int16_t pcm[AMBE_PCM_SAMPLES], ambe_parms *out)
 {
     int32_t magsq[NFFT / 2 + 1], fftbuf[NFFT];
     short fft_exp;
@@ -234,6 +316,35 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
     out->L  = L;
 
     /*
+     * Drive the sub-band stage, two 80-sample calls per frame the way
+     * Vocoder_ProcessFrameFec 0x00016F3C does it.  This has to happen after
+     * the pitch is known, because the voicing rule reads the harmonic grid off
+     * it, and before the ring is committed, because the band loop reads the
+     * ring and the new samples as two pieces.
+     */
+    if (v) {
+        int half;
+        for (half = 0; half < 2; half++) {
+            int32_t en[16];
+            memmove(v->win, v->win + 80,
+                    (AMBE_SUBBAND_HISTORY - 80) * sizeof(int16_t));
+            memcpy(v->win + AMBE_SUBBAND_HISTORY - 80, pcm + half * 80,
+                   80 * sizeof(int16_t));
+            ambe_subband_process(&v->sb, v->win, 80, en);
+            /*
+             * The first half is committed straight away; the second is not,
+             * because the band loop reads the ring and that half's new samples
+             * as two pieces.  It is committed at the end of this function,
+             * once the voicing decision has consumed it - which is exactly
+             * where Vocoder_AnalyzeSpectrum's tail does it.
+             */
+            if (half == 0)
+                ambe_subband_commit(&v->sb);
+        }
+        v->primed = 1;
+    }
+
+    /*
      * The spectrum is the radio's own front end: its 199-point Hamming window
      * folded into a 256-point block-floating-point transform, which is a
      * 128-point complex FFT over the real samples packed even/odd.  See
@@ -300,11 +411,16 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
             bandpk[jl]  += pk;
         }
 
-        for (i = 0; i < 8; i++) {
-            /* a voiced band concentrates its energy at the harmonic centres:
-               pk/tot > 0.60, cross-multiplied so nothing is divided */
-            voiced[i] = (bandtot[i] > 0) &&
-                        (bandpk[i] * VOICE_DEN > bandtot[i] * VOICE_NUM);
+        if (v && v->primed) {
+            envelope_voicing(v, f0, voiced);
+        } else {
+            for (i = 0; i < 8; i++) {
+                /* the old spectral rule: pk/tot > 0.60, cross-multiplied so
+                   nothing is divided.  Kept for ambe_analyse()'s callers, and
+                   measured as a poor decision - see the header comment. */
+                voiced[i] = (bandtot[i] > 0) &&
+                            (bandpk[i] * VOICE_DEN > bandtot[i] * VOICE_NUM);
+            }
         }
 #ifdef AMBE_VOICING_DIAG
         /* Diagnostic only, never built into the library: export the ratio and
@@ -372,6 +488,10 @@ void ambe_analyse(ambe_analysis *a, const int16_t pcm[AMBE_PCM_SAMPLES],
         out->log2Ml[l] = 0;
         out->Vl[l] = 0;
     }
+    /* now the band loop has had it, slide the second half in as well */
+    if (v)
+        ambe_subband_commit(&v->sb);
+
     out->gamma = 0;
     out->repeat = 0;
 }

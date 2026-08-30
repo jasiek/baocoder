@@ -12,26 +12,33 @@
  * test therefore computes the baseline from the same frames it scores, and
  * asserts the estimator beats it.
  *
- * It does not beat it.  At the shipped threshold the estimator scores 48%
- * where the trivial answer scores 67%, so this is a CHARACTERISATION test: it
- * pins a known defect rather than asserting the property one would want.  The
- * assertion is deliberately a floor on the current behaviour, and the baseline
- * is printed next to it every run so the gap cannot be overlooked.
+ * It does now.  The estimator scores 72% against the trivial answer's 67%, and
+ * recovers the exact eight-bit pattern on 22% of frames against 5.5% before -
+ * so this asserts the property one wants rather than pinning a defect.  It was
+ * a characterisation test for as long as the decision was made on the 256-point
+ * speech spectrum; moving it to the sub-band filterbank's envelope spectrum is
+ * what changed it.
  *
- * Retuning does not fix it - see the comment on VOICE_NUM in ambe_analysis.c
- * for the sweep and for why the best available value is not worth its cost in
- * level.  Neither does the radio's own spectrum: tools/proto_voicing.py
- * measured that premise over this corpus and the measure is at chance in the
- * bands where a decision would pay, whatever the resolution.  What the same run
- * Nor does a better decision rule: retuning the threshold is worth about 12
- * points and still lands below always-voiced, and soft scoring over the 16
- * codebook patterns came out worse.  Getting past the trivial answer needs a
- * different feature - and there now is one.  The radio's filterbank measures
- * envelope periodicity rather than spectral harmonic concentration;
- * src/ambe_subband.c computes it and tools/env_voicing.c scores it at AUC
- * 0.762 against 0.615 here, beating always-voiced outright.  Rebuilding the
- * decision on that is what turns this into a pass/fail test.
+ * How it got here is worth keeping, because two plausible fixes were measured
+ * and neither worked.  Retuning the old spectral threshold is worth about 12
+ * points and still lands below always-voiced (the sweep is on VOICE_NUM in
+ * ambe_analysis.c); soft scoring over the 16 codebook patterns, and per-frame
+ * normalisation, both came out worse still.  tools/proto_voicing.py then showed
+ * why: on the 256-point speech spectrum the measure is at chance in exactly the
+ * bands where a decision would pay, at any window length, so no rule built on
+ * it could beat the trivial answer.
+ *
+ * What worked was changing the quantity.  The radio's filterbank transforms
+ * channel *magnitudes*, so it measures envelope periodicity rather than
+ * spectral harmonic concentration - a different thing in a different domain.
+ * src/ambe_subband.c computes it, tools/env_voicing.c scores it at AUC 0.762
+ * against the spectral rule's 0.615, and ambe_analysis.c now decides on it.
  * docs/fixed-point.md, "Envelope periodicity, measured", has the tables.
+ *
+ * One coupling to know about: voicing and amplitude are linked, because an
+ * unvoiced harmonic is rescaled at the amplitude step.  Changing this decision
+ * cost 3.6 dB of round-trip level until AMBE_ML_SCALE_Q16 was re-swept, which
+ * is why tests/test_encode_pcm.c must be re-run alongside this one.
  *
  * SPDX-License-Identifier: ISC
  */
@@ -97,16 +104,28 @@ int main(void)
     }
 
     CHECK(frames > 1000, "only %d comparable frames\n", frames);
+
     /*
-     * A floor on the known-bad current behaviour, not the bar that matters.
-     * The bar that matters is bandhit > refvoiced, and it does not hold.
+     * The bar that matters, and it now holds: the estimator must beat the
+     * trivial answer on the same bands it is scored over.  This was a
+     * characterisation test pinning a known defect until the voicing decision
+     * moved to the envelope spectrum; it is a pass/fail test now.
+     *
+     * The comparison is against the corpus's own voiced fraction rather than a
+     * constant, so it stays honest if the corpus changes.
      */
-    CHECK(bandhit * 100 > bandtot * 45,
-          "voicing scores %d/%d bands, below even its own recorded floor\n",
-          bandhit, bandtot);
+    CHECK(bandhit > refvoiced,
+          "voicing scores %d/%d bands (%.2f%%) against %.2f%% for answering "
+          "\"voiced\" every time - the estimator carries no information\n",
+          bandhit, bandtot, 100.0 * bandhit / bandtot,
+          100.0 * refvoiced / bandtot);
+
+    /* and a floor under the whole-pattern rate, which moved 5.5% -> 22.3% */
+    CHECK(exact * 100 > frames * 15,
+          "only %d of %d frames recover the exact pattern\n", exact, frames);
 
     printf("[%d frames; b1 exact %d (%.1f%%); bands %.2f%% vs %.2f%% for "
-           "always-voiced - KNOWN DEFECT, see VOICE_NUM] ",
+           "always-voiced] ",
            frames, exact, 100.0 * exact / frames,
            100.0 * bandhit / bandtot, 100.0 * refvoiced / bandtot);
     return t_done("encoder: voicing, against the transmitted pattern");
