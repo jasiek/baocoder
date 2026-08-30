@@ -1133,6 +1133,42 @@ been hit by this (`Math_Pow2`, and both unpaired samples in
 transcription of a `& 0x7fff) >> 1` needs a test case with negative inputs
 before it can be believed.
 
+### How much pitch headroom is there? Roughly none
+
+mbelib cannot answer this: it is a decoder, so it dequantises pitch but never
+estimates it. The decode side is already held against it — `test_params` has
+w0 agreeing to 3.1e-06 — and for the *estimator* there is no reference
+implementation to compare with at all, since no open AMBE encoder exists.
+
+`tools/yin_reference.py` substitutes an independent **algorithm** for an
+independent implementation: YIN, whose cumulative-mean-normalised difference is
+specifically the step that kills the octave errors a plain correlation makes.
+
+| within 4 steps of the transmitted b0 | |
+|---|---|
+| the analyser's NCC | **86.3 %** |
+| YIN | 80.7 % |
+
+YIN is worse, which is mildly reassuring on its own. The useful result is where
+the two fail. On the 153 frames the analyser gets wrong, **YIN is also wrong on
+92.8 %**, and an oracle picking the better of the two every frame reaches
+87.3 %. YIN's own aperiodicity score says why:
+
+| | analyser succeeds | analyser fails |
+|---|---|---|
+| YIN aperiodicity, median | 0.084 | **0.670** |
+| above YIN's own 0.15 "unvoiced" line | 30.7 % | **86.9 %** |
+
+and aperiodicity predicts the analyser's failure with **AUC 0.861**.
+
+So the frames the analyser gets wrong are frames whose audio is not periodic
+enough to carry a recoverable pitch, and two unrelated algorithms agree about
+which ones they are. **86.3 % is near the ceiling for this corpus, not a
+shortfall.** That also settles what `Vocoder_RefinePitchEstimate`'s remaining
+164-byte gap is worth: the bottleneck is the signal, so closing it — which
+would mean inventing a saturation rule with nothing in the image to check it
+against — buys at most a point or two.
+
 ### Pitch from the envelope spectrum: measured, and it does not work
 
 The envelope spectrum's peak is the fundamental — `tests/test_subband.c` shows
