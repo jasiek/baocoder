@@ -473,16 +473,18 @@ int ambe_subband_process(ambe_subband *s,
     }
     (void)bins32;
 
-    /* decimate, then slide each channel of the ring on by `count` */
+    /*
+     * Decimate into the fresh buffer.  The ring is deliberately left alone:
+     * the eight-band loop reads it and the fresh samples as two pieces, and
+     * the stock code only slides it afterwards, in Vocoder_AnalyzeSpectrum's
+     * tail.  ambe_subband_commit does that.
+     */
     for (c = 0; c < 16; c++) {
         ambe_subband_decimate(out, sets, c, count);
-        memmove(&s->ring[c * AMBE_SUBBAND_RING],
-                &s->ring[c * AMBE_SUBBAND_RING] + count,
-                (size_t)(AMBE_SUBBAND_RING - count) * sizeof(int16_t));
         for (o = 0; o < count; o++)
-            s->ring[c * AMBE_SUBBAND_RING + AMBE_SUBBAND_RING - count + o] =
-                out[o];
+            s->fresh[c * AMBE_SUBBAND_MAX_OUT + o] = out[o];
     }
+    s->nfresh = count;
 
     /* carry the last five sets, which is what the next call's decimator needs */
     memcpy(s->hist, sets + nsets * 16, sizeof(s->hist));
@@ -490,4 +492,105 @@ int ambe_subband_process(ambe_subband *s,
     ambe_subband_segs_advance(&s->segs, count, e_in);
     s->primed = 1;
     return count;
+}
+
+void ambe_subband_commit(ambe_subband *s)
+{
+    int c, o;
+
+    if (s->nfresh <= 0)
+        return;
+    for (c = 0; c < 16; c++) {
+        int16_t *r = &s->ring[c * AMBE_SUBBAND_RING];
+        memmove(r, r + s->nfresh,
+                (size_t)(AMBE_SUBBAND_RING - s->nfresh) * sizeof(int16_t));
+        for (o = 0; o < s->nfresh; o++)
+            r[AMBE_SUBBAND_RING - s->nfresh + o] =
+                s->fresh[c * AMBE_SUBBAND_MAX_OUT + o];
+    }
+    s->nfresh = 0;
+}
+
+/*
+ * The segment the band loop transforms: 58 - n samples of ring followed by
+ * this call's n new ones, where the ring read starts at n - 9.  With n = 10
+ * that is ring[1..48] - the oldest sample of the 49 is dropped - and with the
+ * smallest n the caller's clamp allows, 9, it is ring[0..48], the whole ring
+ * exactly.  So the 49-deep ring and the 76-sample lower clamp are two numbers
+ * from different functions that just meet, the same way the 16 x 11 buffer and
+ * the 84-sample upper clamp did.
+ */
+int ambe_subband_segment(const ambe_subband *s, int chan, int16_t seg[58])
+{
+    int n = s->nfresh, from, take, i;
+
+    if (n < 9 || n > AMBE_SUBBAND_MAX_OUT)
+        return 0;
+    from = n - 9;
+    take = AMBE_BAND_SEG - n;
+    if (from + take > AMBE_SUBBAND_RING)
+        return 0;
+    for (i = 0; i < take; i++)
+        seg[i] = s->ring[chan * AMBE_SUBBAND_RING + from + i];
+    for (i = 0; i < n; i++)
+        seg[take + i] = s->fresh[chan * AMBE_SUBBAND_MAX_OUT + i];
+    return 1;
+}
+
+/*
+ * The eight-band loop, from Vocoder_AnalyzeSpectrum 0x000205B8.
+ *
+ * Eight bands of two channels each.  Every channel's 58-sample segment goes
+ * through the 58-tap window into the 64-point transform; the two spectra are
+ * combined by exponent-aligned add, and the band's 32 bins are overlap-added
+ * into a 128-entry array at a stride of 16, so neighbouring bands share half
+ * their bins.  8 x 16 = 128 is exactly the array the voicing rule reads.
+ *
+ * The stock code carries a common exponent picked by
+ * Math_ArrayMax(param_1 + 0x310, 7) across the seven segment stretches and
+ * shifts each stretch down to it before transforming.  Here that alignment is
+ * already in the samples: ambe_subband_magnitudes returns every channel sample
+ * in the input's own units (see there), so the ring is homogeneous and the
+ * per-stretch shifts are all zero.  The segment register is still maintained
+ * and still says which stretches are live, which is what a bit-exactness
+ * comparison against the firmware will need; it is not needed to compute the
+ * spectrum.
+ */
+int ambe_band_analyse(const ambe_subband *s, int32_t spec[128],
+                      short band_exp[8])
+{
+    int32_t a[32], b[32], band[32];
+    int16_t seg[AMBE_BAND_SEG];
+    short ea, eb, e;
+    int i, bd;
+
+    for (i = 0; i < 128; i++)
+        spec[i] = 0;
+
+    for (bd = 0; bd < AMBE_BANDS; bd++) {
+        if (!ambe_subband_segment(s, 2 * bd, seg))
+            return 0;
+        ea = ambe_band_spectrum(a, seg, 0);
+        if (!ambe_subband_segment(s, 2 * bd + 1, seg))
+            return 0;
+        eb = ambe_band_spectrum(b, seg, 0);
+
+        e = ambe_band_add(band, a, ea, b, eb);
+        band_exp[bd] = e;
+
+        /*
+         * Overlap-add into the running spectrum.  The first 16 bins land on
+         * the previous band's tail, which is already written; the second 16
+         * start fresh.  The stock code does the same add with the exponents
+         * aligned, and the eighth band's tail runs into the adjacent buffer,
+         * which is why the array is exactly 128 and not 8 x 32.
+         */
+        for (i = 0; i < AMBE_BAND_BINS; i++) {
+            int at = bd * AMBE_BAND_STRIDE + i;
+            if (at >= 128)
+                break;
+            spec[at] += band[i];
+        }
+    }
+    return 1;
 }

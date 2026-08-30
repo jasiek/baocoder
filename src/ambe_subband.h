@@ -145,7 +145,9 @@ void ambe_subband_segs_advance(ambe_subband_segs *s, int count, int new_exp);
 typedef struct {
     int16_t acc;                                       /* resampler remainder */
     int16_t hist[AMBE_SUBBAND_HIST_SETS * 16];         /* carried sample-sets */
-    int16_t ring[16 * AMBE_SUBBAND_RING];    /* 16 channels */
+    int16_t ring[16 * AMBE_SUBBAND_RING];    /* 16 channels, before this call */
+    int16_t fresh[16 * AMBE_SUBBAND_MAX_OUT];/* this call's new samples       */
+    int     nfresh;
     ambe_subband_segs segs;
     int     primed;
 } ambe_subband;
@@ -161,5 +163,35 @@ void ambe_subband_init(ambe_subband *s);
 int ambe_subband_process(ambe_subband *s,
                          const int16_t history[AMBE_SUBBAND_HISTORY],
                          int nframe, int32_t energy[16]);
+
+/*
+ * Slide this call's new samples into the ring.  Kept separate because the
+ * stock code does it in Vocoder_AnalyzeSpectrum's *tail*, after the eight-band
+ * loop has read the ring and the new samples as two pieces - so committing
+ * early would hand the band loop a ring that had already moved.
+ */
+void ambe_subband_commit(ambe_subband *s);
+
+/*
+ * One channel's 58-sample segment, assembled the way the band loop assembles
+ * it: 58 - nfresh samples from the ring starting at nfresh - 9, then this
+ * call's nfresh new ones.  Returns 0 if the state cannot supply them.
+ *
+ * The ring depth and the caller's frame-size clamp corroborate each other
+ * here: the read starts at nfresh - 9, so nfresh must be at least 9, and the
+ * smallest frame size the caller may pass (76) yields exactly 9.
+ */
+int ambe_subband_segment(const ambe_subband *s, int chan, int16_t seg[58]);
+
+
+/*
+ * The eight-band loop.  Builds the 128-entry spectrum the voicing rule reads:
+ * each band transforms its two channels' segments, adds them, and overlap-adds
+ * the 32 result bins into `spec` at a stride of 16.  `band_exp` receives the
+ * eight per-band exponents - Vocoder_SelectSpectralSubbands's fourth argument.
+ * Returns 0 if the state cannot yet supply full segments.
+ */
+int ambe_band_analyse(const ambe_subband *s, int32_t spec[128],
+                      short band_exp[8]);
 
 #endif /* AMBE_SUBBAND_H */

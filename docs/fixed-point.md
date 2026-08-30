@@ -713,6 +713,42 @@ So transcribing the filterbank will not fix voicing. It is still wanted for
 bit-exactness and it is still on the path for pitch, but it should not be
 undertaken *for voicing's sake* on the strength of the resolution argument.
 
+### What the band spectrum turns out to be, and what that costs the conclusion
+
+Assembling the eight-band loop settled what its 128-entry array actually holds,
+and it is **not** a speech spectrum.
+
+The channel signals the loop transforms are *magnitudes* — `|X[b]|` per
+sample-set, an envelope — sampled at 1000 Hz after the decimation. So
+transforming 58 of them measures how each channel's envelope varies, at
+`1000/64 = 15.625` Hz per bin, and zeroing bins 0 and 1 throws away the steady
+part. It is an **envelope-modulation spectrum**. A voiced signal modulates
+every channel at its fundamental; an unvoiced one does not.
+
+Driving synthetic signals through the assembled stage confirms it: over f0 from
+80 to 400 Hz the voiced peak lands within 1.5 bins of `f0 / 15.625` in 10 of 17
+cases, and the voiced peak carries a larger share of the band's energy than the
+matching unvoiced signal in 15 of 17. That also explains
+`Dsp_SumSpectralBand`'s harmonic grid with `step = pitch * 128`: it is looking
+for the pitch and its multiples in the *envelope* domain.
+
+**This qualifies the conclusion recorded above.** The sweep that found
+"resolution is not the bottleneck" used a longer window on the ordinary speech
+spectrum as a proxy for the filterbank. That proxy was wrong in a way the
+controls could not catch: the firmware does not measure the library's quantity
+at higher resolution, it measures a *different quantity in a different domain*.
+So what those tables establish is that **the library's own feature** cannot be
+rescued by resolution or by a better decision rule — which stands, and is why
+the shipped estimator loses to always-voiced. They establish nothing about the
+firmware's feature, which was never tested.
+
+Whether envelope periodicity separates voicing on the real corpus is now a
+cheap question, because the stage that computes it exists: run the captures
+through `ambe_subband_process` and `ambe_band_analyse` and score the result the
+way `tools/proto_voicing.py` scores the current one. That is the next
+experiment, and it is the one that should decide whether the analyser's voicing
+can be fixed at all.
+
 ### Two controls, one of which corrects the sweep above
 
 **The window straddles voicing changes.** The pattern changes every 20 ms, so a
@@ -950,10 +986,13 @@ asserted.
    index, an off-by-one in the 4-sample set spacing or a mis-slid ring would
    all leave every unit test passing and fail here.
 
-   What is left is the **eight-band loop's own assembly**: driving the eight
-   bands from the ring, aligning each channel's seven segments to the common
-   maximum `Math_ArrayMax(param_1 + 0x310, 7)` picks, and writing the 32 bins
-   per band at a stride of 16 into the 128 the voicing rule reads.
+   The **eight-band loop is assembled too** (`ambe_band_analyse`), and driving
+   it end to end turned up the thing that reframes the voicing question — see
+   "What the band spectrum turns out to be" below.
+
+   What is left is holding the whole analyser against the firmware for
+   bit-exactness. Every stage now exists and is checked in isolation and in
+   combination; nothing further needs reading out of the image.
 3. **The voicing rule** is fully read — per band, `E_harm/E_total > 0.80` with
    `pitch` = this library's `f0` (Q19) shifted right by two, and a per-band
    octave alternative above 200 Hz — but **do not expect it to fix voicing**,

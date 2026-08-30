@@ -621,6 +621,7 @@ int main(void)
                 n0 += 80;
                 CHECK(ambe_subband_process(&st, hist, 80, en) > 0,
                       "channel %d: the stage produced no samples\n", ch);
+                ambe_subband_commit(&st);
                 if (fr >= 20)          /* let the ring and history fill */
                     for (b = 0; b < 16; b++) tot[b] += en[b] >> 8;
             }
@@ -657,6 +658,94 @@ int main(void)
         }
         printf("\n    stage     %d/15 tones land in their own channel, "
                "ring carries them", hits);
+    }
+
+    /*
+     * The eight-band loop, driven end to end.
+     *
+     * What this spectrum *is* took working out and is worth stating, because
+     * it is not the speech spectrum the library's own voicing rule measures.
+     * The channel signals are magnitudes - envelopes - sampled at 1000 Hz, so
+     * transforming 58 of them measures how each channel's envelope varies, at
+     * 1000/64 = 15.625 Hz per bin, and zeroing bins 0 and 1 throws away the
+     * steady part.  It is an envelope-modulation spectrum, and a voiced signal
+     * modulates every channel at its fundamental.
+     *
+     * The assertion is the robust half of that: a voiced signal must put more
+     * of its band-0 energy into one bin than the matching unvoiced signal
+     * does.  The peak's *position* tracking f0 is the interesting half but is
+     * only reliable over part of the range, so it is counted and printed
+     * rather than asserted - asserting it on the sub-range where it happens to
+     * hold would be fitting the test to the result.
+     */
+    {
+        ambe_subband st;
+        int16_t hist[AMBE_SUBBAND_HISTORY];
+        int32_t en[16], spec[128];
+        short bexp[8];
+        double f0;
+        int conc = 0, atf0 = 0, cases = 0;
+
+        for (f0 = 80.0; f0 <= 400.0; f0 += 20.0) {
+            double pkfrac[2];
+            int v;
+            for (v = 0; v < 2; v++) {
+                long n0 = 0;
+                int fr, k, got = 0, pk = 2;
+                double tot = 0.0;
+                int L = (int)(3800.0 / f0);
+                if (L > 56) L = 56;
+                ambe_subband_init(&st);
+                memset(hist, 0, sizeof(hist));
+                memset(spec, 0, sizeof(spec));
+                for (fr = 0; fr < 60; fr++) {
+                    memmove(hist, hist + 80,
+                            (AMBE_SUBBAND_HISTORY - 80) * sizeof(int16_t));
+                    for (i = 0; i < 80; i++) {
+                        double t = (double)(n0 + i) / 8000.0, acc = 0.0;
+                        int l, q;
+                        for (l = 1; l <= L; l++) {
+                            if (v)
+                                acc += cos(2.0 * M_PI * f0 * l * t + 0.7 * l);
+                            else
+                                for (q = 0; q < 3; q++)
+                                    acc += cos(2.0 * M_PI * f0
+                                               * ((l * 6 + 2 * q - 2) / 6.0) * t
+                                               + 0.7 * l + 1.7 * q) / sqrt(3.0);
+                        }
+                        hist[AMBE_SUBBAND_HISTORY - 80 + i] =
+                            (int16_t)(acc / L * 9000.0);
+                    }
+                    n0 += 80;
+                    ambe_subband_process(&st, hist, 80, en);
+                    if (fr >= 40)
+                        got = ambe_band_analyse(&st, spec, bexp);
+                    ambe_subband_commit(&st);
+                }
+                CHECK(got == 1, "band analyse produced nothing at f0 %.0f\n", f0);
+                for (k = 2; k < 32; k++) {
+                    if (spec[k] > spec[pk]) pk = k;
+                    tot += (double)spec[k];
+                }
+                pkfrac[v] = tot > 0.0 ? (double)spec[pk] / tot : 0.0;
+                if (v && fabs(pk - f0 / (1000.0 / 64.0)) <= 1.5)
+                    atf0++;
+            }
+            cases++;
+            if (pkfrac[1] > pkfrac[0])
+                conc++;
+        }
+        /*
+         * 13 of 17 is what this measures; the bar is set below that with
+         * margin because the signals are synthetic and the phases arbitrary,
+         * so the exact count moves.  The printed figure is the real signal -
+         * a regression that broke the loop would collapse it, not shave it.
+         */
+        CHECK(conc >= cases - 6,
+              "voiced concentrated more than unvoiced in only %d of %d\n",
+              conc, cases);
+        printf("\n    bandloop  voiced beats unvoiced on concentration "
+               "%d/%d, peak at f0 %d/%d", conc, cases, atf0, cases);
     }
 
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
