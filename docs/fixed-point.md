@@ -1114,9 +1114,10 @@ asserted.
    block the voicing work, because the pitch argument's format was pinned
    without it.
 
-Pitch remains the weakest measured stage (173/191 within four quantiser steps,
-one octave error) and voicing the worst (48 % against a 67 % trivial baseline —
-and against 70 % for ignoring the audio and using the per-band priors).
+Pitch is now the weakest measured stage on its own: 86.3 % within four
+quantiser steps over the corpus, and the envelope spectrum has been measured
+and ruled out as an alternative (see below). Voicing, which was the worst at
+48 % against a 67 % trivial baseline, now scores 72 % and beats it.
 
 **Three traps, all of which cost real time.** The tables are nonsense against
 `DM32UV_L01_048.bin` — the SRAM image that `BASE = 0x0636C0` maps is the one in
@@ -1131,6 +1132,31 @@ been hit by this (`Math_Pow2`, and both unpaired samples in
 `Vocoder_SubbandSumDifference`). It is silent on non-negative data, so any
 transcription of a `& 0x7fff) >> 1` needs a test case with negative inputs
 before it can be believed.
+
+### Pitch from the envelope spectrum: measured, and it does not work
+
+The envelope spectrum's peak is the fundamental — `tests/test_subband.c` shows
+that on synthetic signals — so using it instead of the analyser's normalised
+cross-correlation looked like a way to kill the octave errors that search
+makes. `tools/env_pitch.c` measures it against the transmitted pitch over the
+same 1117 frames:
+
+| within | NCC, current | envelope peak |
+|---|---|---|
+| 1 quantiser step | **60.6 %** | 34.0 % |
+| 2 steps | **77.0 %** | 51.7 % |
+| 4 steps | **86.3 %** | 68.8 % |
+| 8 steps | **90.5 %** | 81.6 % |
+
+Much worse, and — the part that closes the question — **they are not
+complementary**. On the 153 frames where the NCC is off by more than four
+steps, the envelope estimate is within four on **3.9 %** of them. An oracle
+allowed to pick the better of the two every frame reaches 86.8 % against the
+NCC's 86.3 %, so even a perfect combiner is worth half a point and no real one
+is worth building.
+
+The frames the NCC gets wrong are simply hard, and the filterbank finds them
+hard too. Pitch stays open, and the envelope spectrum is not the way in.
 
 ## Still open
 
