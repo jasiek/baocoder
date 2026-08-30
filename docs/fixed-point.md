@@ -713,33 +713,71 @@ So transcribing the filterbank will not fix voicing. It is still wanted for
 bit-exactness and it is still on the path for pitch, but it should not be
 undertaken *for voicing's sake* on the strength of the resolution argument.
 
-### What would actually help
+### Two controls, one of which corrects the sweep above
 
-The same run says where the score is. The voicing pattern is not eight
-independent bits: the encoder picks one of 16 codebook entries, **12 of which
-are a pure voiced-then-unvoiced cutoff**, and the other four differ from a
-cutoff by a single bit. Band 0 is voiced in all sixteen; band 1 in fifteen.
-So the decision is very nearly "where is the cutoff", a single number 1..8.
+**The window straddles voicing changes.** The pattern changes every 20 ms, so a
+320-sample window covers two frames with different labels. Restricting to
+frames whose whole window lies inside one pattern:
 
-Scored on the same 8928 bands:
+| window | set | separation | AUC | n |
+|---|---|---|---|---|
+| 199/256 | all | +0.069 | 0.615 | 8928 |
+| 199/256 | stable | +0.092 | 0.652 | 3376 |
+| 320/512 | all | +0.116 | 0.630 | 8928 |
+| 320/512 | stable | **+0.150** | **0.660** | 3376 |
+| 464/512 | stable | +0.159 | 0.662 | 1816 |
+
+So the first sweep understated resolution's value, and part of why long windows
+looked bad is that they straddle more frames rather than that they blur speech.
+Corrected, AUC still tops out near **0.66**, best accuracy still equals the
+baseline, kappa still 0.000 — and the stable subsets are themselves biased
+towards the all-voiced pattern (their baselines rise to 0.78–0.88), so even that
+0.66 flatters the measure.
+
+**The measure itself is sound.** On synthetic signals — pure harmonics against
+an unvoiced mix built exactly as `ambe_synth.c` builds one, three lines per
+harmonic at *l*−⅓, *l*, *l*+⅓ — the same code separates by **+0.41 to +0.70**,
+scoring voiced near 1.000 and unvoiced near 0.33, which is what the geometry
+predicts since two of the three lines fall outside the ±step/4 window by
+construction.
+
+That is the important pair. The formula is right and the arithmetic is right;
+on real decoded speech the same measure recovers a quarter of the separation it
+achieves on stationary signals. What is missing is in the *signal*, not the
+spectrum's resolution and not the rule.
+
+### What would actually help — less than first thought
+
+The voicing pattern is not eight independent bits: the encoder picks one of 16
+codebook entries, **12 of which are a pure voiced-then-unvoiced cutoff**, and
+the other four differ from a cutoff by a single bit. Band 0 is voiced in all
+sixteen, band 1 in fifteen. So the decision is nearly "where is the cutoff", a
+single number 1..8, and `ambe_encode_params.c` already picks the best-matching
+codebook pattern — the hard threshold upstream is what feeds it nonsense.
+
+Scored on the same 8928 bands, at the library's own 199/256 window, always
+through that same nearest-pattern step:
 
 | decision | accuracy |
 |---|---|
-| the shipped estimator | **0.480** |
-| always voiced | 0.672 |
-| per-band prior alone, ignoring the audio | 0.702 |
-| per-band prior + the ratio | 0.730 |
+| threshold 0.60, i.e. what ships | 0.524 |
+| threshold 0.45 | 0.611 |
+| **threshold 0.40** | **0.647** |
+| always voiced | **0.672** |
+| per-band prior alone, ignoring the audio (fits this corpus) | 0.702 |
 
-The shipped estimator is 19 points *below* ignoring the audio entirely. The
-cheap, large win is restructuring the decision — pick a cutoff, or score the
-16 codebook patterns directly — not sharpening the spectrum it is fed.
+**No rule driven by this measure beats always-voiced.** Retuning the threshold
+from 0.60 to 0.40 is worth about 12 points and is still below the trivial
+answer; per-frame normalisation, and scoring the 16 patterns softly rather than
+thresholding first, were both tried and both came out below 0.65. The 0.702 row
+is a *constant* prediction that ignores the audio, and it is fitted to six
+captures, so it is a reference point rather than a proposal.
 
-Two honest limits on this. The sweep uses a long window as a proxy for the
-filterbank, and the filterbank bandlimits before decimating, which is not the
-identical operation; and the per-band priors are measured on six captures, so
-using them as constants would be fitting this corpus. Neither weakens the
-binding result, which is about the *measure* rather than the spectrum: AUC 0.49
-in the bands that matter.
+So the honest position is that there is no large win here, and in particular
+the estimator cannot be fixed by a better spectrum, a better threshold, or a
+better decision rule over this feature. Getting past 0.672 needs a different
+feature. The all-unvoiced fallback was also checked as a suspect and is not
+one: disabling it moves the score by 0.33 points.
 
 ### The filterbank, mapped
 
@@ -922,13 +960,14 @@ tables are extracted and asserted.
    at chance (AUC 0.489–0.509). Resolution is not the bottleneck. The section
    "Resolution is not the bottleneck — measured" has the numbers.
 
-   The voicing win is a **separate, cheaper piece of work**: the decision is
-   near enough "where is the voiced/unvoiced cutoff", since 12 of the 16
-   codebook patterns are a pure cutoff and the rest differ by one bit. Per-band
-   priors alone score 0.702 and priors plus the ratio 0.730, against the
-   shipped estimator's 0.480 — so restructuring the decision is worth about
-   25 points and needs no filterbank at all. That is the highest-value item on
-   this list.
+   Nor is there a cheap win in the decision rule, which was the next guess and
+   was also measured. `ambe_encode_params.c` already picks the best-matching
+   codebook pattern; retuning the upstream threshold from 0.60 to 0.40 is worth
+   about 12 points and still lands below always-voiced, and soft pattern
+   scoring and per-frame normalisation both came out worse. **No rule driven by
+   this feature beats answering "voiced".** Getting past that needs a different
+   feature, and nothing currently in hand suggests one — so this item is open
+   research, not a task.
 4. `Vocoder_AnalyzeSpectrum` `0x000205B8` (747 lines, clean) also carries the
    amplitude path — the band-energy loop at its tail, groups of 5 then 8 bins
    scaled by `0x4800`.

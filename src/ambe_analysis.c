@@ -103,11 +103,18 @@
  * 0.615 to at best 0.630 and then falls, and in the four bands where the prior
  * is near 50% and a decision would actually pay, the measure sits at chance.
  *
- * What the same run says is that the decision is the wrong shape.  12 of the 16
- * codebook voicing patterns are a pure voiced-then-unvoiced cutoff, so this is
- * nearly a single number rather than eight independent bits - and per-band
- * priors alone score 70% against this estimator's 48%.  docs/fixed-point.md,
- * "Resolution is not the bottleneck", carries the tables.
+ * Nor is the decision rule the fix, which was the next guess and was measured
+ * too: ambe_encode_params.c already picks the best-matching codebook pattern,
+ * retuning this threshold to 0.40 is worth about 12 points and still lands
+ * below always-voiced, and soft pattern scoring and per-frame normalisation
+ * both came out worse.  No rule driven by this feature beats answering
+ * "voiced".
+ *
+ * The measure itself is not at fault: on synthetic signals - pure harmonics
+ * against an unvoiced mix built the way ambe_synth.c builds one - the same code
+ * separates by +0.41 to +0.70.  On real decoded speech it recovers a quarter of
+ * that.  What is missing is in the signal.  docs/fixed-point.md, "Resolution is
+ * not the bottleneck", carries all of it.
  */
 #ifndef VOICE_NUM
 #define VOICE_NUM 60

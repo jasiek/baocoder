@@ -23,9 +23,12 @@
  * level.  Neither does the radio's own spectrum: tools/proto_voicing.py
  * measured that premise over this corpus and the measure is at chance in the
  * bands where a decision would pay, whatever the resolution.  What the same run
- * points at is the shape of the decision - 12 of the 16 codebook patterns are a
- * pure voiced/unvoiced cutoff, and per-band priors alone score 70% against the
- * 48% here.  docs/fixed-point.md, "Resolution is not the bottleneck".
+ * Nor does a better decision rule: retuning the threshold is worth about 12
+ * points and still lands below always-voiced, and soft scoring over the 16
+ * codebook patterns came out worse.  The measure is sound in isolation - on
+ * synthetic signals it separates by +0.41 to +0.70 - so what is missing is in
+ * the signal.  Getting past the trivial answer needs a different feature.
+ * docs/fixed-point.md, "Resolution is not the bottleneck", has the tables.
  *
  * SPDX-License-Identifier: ISC
  */

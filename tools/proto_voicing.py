@@ -114,6 +114,59 @@ def score(vals, truth):
     return base, acc, kappa, auc
 
 
+
+def synthetic_control(nwin=320, nfft=512):
+    """Is the measure itself sound?  Ground truth, no corpus.
+
+    Builds a perfectly voiced signal (pure harmonics) and a perfectly unvoiced
+    one synthesised exactly the way ambe_synth.c does it - uvquality = 3 lines
+    per harmonic at l-1/3, l, l+1/3 with independent random phases - and runs
+    the same measure over both.  If the measure works at all it must score the
+    first near 1.0 and the second near 0.33, because two of the three unvoiced
+    lines fall outside the +-step/4 numerator window by construction.
+
+    This is what separates "the formula is wrong" from "the signal does not
+    carry it", and the answer is the latter: the measure separates these by
+    +0.42 to +0.70, far more than it ever manages on real decoded speech.
+    """
+    rng = np.random.default_rng(1)
+    print("\nControl: the measure on synthetic signals, where truth is exact\n")
+    print("    f0     bins/harm   voiced   unvoiced   separation")
+    print("  ------   ---------   ------   --------   ----------")
+    for f0 in (0.0100, 0.0150, 0.0200, 0.0250, 0.0313, 0.0400, 0.0500):
+        L = min(int(0.5 / f0), 56)
+        n = np.arange(nwin)
+        v = np.zeros(nwin)
+        u = np.zeros(nwin)
+        for l in range(1, L + 1):
+            v += np.cos(2 * np.pi * f0 * l * n + rng.uniform(0, 2 * np.pi))
+            for i in range(3):
+                num = (l * 6 + 2 * i - 2) / 6.0
+                u += np.cos(2 * np.pi * f0 * num * n
+                            + rng.uniform(0, 2 * np.pi)) / np.sqrt(3)
+
+        def one(x):
+            w = x * np.hamming(nwin)
+            X = np.abs(np.fft.rfft(w, nfft)) ** 2
+            bph = f0 * nfft
+            tot = pk = 0.0
+            for l in range(1, L + 1):
+                c = l * bph
+                lo = max(int(round(c - bph / 2)), 1)
+                hi = min(int(round(c + bph / 2)), nfft // 2)
+                if hi < lo:
+                    continue
+                k = np.arange(lo, hi + 1)
+                m = X[k]
+                tot += m.sum()
+                pk += m[np.abs(k - c) <= bph / 4].sum()
+            return pk / tot if tot > 0 else float('nan')
+
+        rv, ru = one(v), one(u)
+        print("  %.4f   %9.2f   %6.3f   %8.3f   %+10.3f"
+              % (f0, f0 * nfft, rv, ru, rv - ru))
+
+
 def main():
     caps = load(sys.argv[1])
 
@@ -193,6 +246,8 @@ def main():
     print("  per-band prior only  %.3f" % (tb / tn))
     print("  per-band + the ratio %.3f   (the ratio is worth %+.3f)"
           % (tc / tn, (tc - tb) / tn))
+
+    synthetic_control()
 
 
 main()
