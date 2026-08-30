@@ -941,11 +941,19 @@ asserted.
    Tested by the invariant that the seven segments tile the 58-sample window
    exactly, over 400 frames of varying size.
 
-   What is left is **assembly, not reading**: running these in the loop the
-   stock function runs them in, driving the eight bands from the 16 × 49 ring
-   through `Math_ArrayMax(param_1 + 0x310, 7)`'s common exponent, and holding
-   the whole stage against the firmware. Every piece it needs now exists and is
-   checked.
+   The 16-channel stage is now **assembled and driven**: `ambe_subband_process`
+   schedules, normalises, transforms every sample-set, accumulates the
+   energies, takes the magnitudes, decimates and slides the ring.
+   `tests/test_subband.c` drives real audio through it and checks the thing the
+   per-piece tests cannot — that a tone lands in the channel whose band
+   contains it, 15 of 15, and that the ring carries it. A transposed channel
+   index, an off-by-one in the 4-sample set spacing or a mis-slid ring would
+   all leave every unit test passing and fail here.
+
+   What is left is the **eight-band loop's own assembly**: driving the eight
+   bands from the ring, aligning each channel's seven segments to the common
+   maximum `Math_ArrayMax(param_1 + 0x310, 7)` picks, and writing the 32 bins
+   per band at a stride of 16 into the 128 the voicing rule reads.
 3. **The voicing rule** is fully read — per band, `E_harm/E_total > 0.80` with
    `pitch` = this library's `f0` (Q19) shifted right by two, and a per-band
    octave alternative above 200 Hz — but **do not expect it to fix voicing**,

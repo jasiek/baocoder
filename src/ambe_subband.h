@@ -125,4 +125,41 @@ typedef struct {
  */
 void ambe_subband_segs_advance(ambe_subband_segs *s, int count, int new_exp);
 
+
+/* ---- the whole 16-channel stage ------------------------------------------
+ *
+ * Vocoder_AnalyzeSubbandSpectrum 0x00023AA8 assembled: schedule, normalise,
+ * window and transform every sample-set, accumulate the band energies, take
+ * the magnitudes, decimate, and slide the 16 x 49 ring.
+ *
+ * The piece counts corroborate each other.  Sample-sets are 4 input samples
+ * apart and there are two per output, so 2*count sets need 8*count + 28 input
+ * samples - exactly what ambe_subband_advance asks for.  The decimator reads
+ * 7 sets per output and the last output reads sets 2*(count-1) .. 2*count+4,
+ * which the 5 carried sets plus the 2*count new ones cover exactly.
+ */
+
+#define AMBE_SUBBAND_HIST_SETS 5    /* decimator history carried between calls */
+#define AMBE_SUBBAND_RING      49   /* per channel                             */
+
+typedef struct {
+    int16_t acc;                                       /* resampler remainder */
+    int16_t hist[AMBE_SUBBAND_HIST_SETS * 16];         /* carried sample-sets */
+    int16_t ring[16 * AMBE_SUBBAND_RING];    /* 16 channels */
+    ambe_subband_segs segs;
+    int     primed;
+} ambe_subband;
+
+void ambe_subband_init(ambe_subband *s);
+
+/*
+ * One call.  `history` is the caller's AMBE_SUBBAND_HISTORY-sample analysis
+ * buffer, newest last; `nframe` the frame size (76..84).  `energy` receives the
+ * sixteen accumulated band energies, zeroed first.  Returns the number of new
+ * samples appended to each channel of the ring.
+ */
+int ambe_subband_process(ambe_subband *s,
+                         const int16_t history[AMBE_SUBBAND_HISTORY],
+                         int nframe, int32_t energy[16]);
+
 #endif /* AMBE_SUBBAND_H */

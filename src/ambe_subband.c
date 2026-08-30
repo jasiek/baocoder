@@ -43,6 +43,7 @@
  *
  * SPDX-License-Identifier: ISC
  */
+#include <string.h>
 #include "ambe_subband.h"
 #include "ambe_basop.h"
 #include "ambe_fft.h"
@@ -399,4 +400,94 @@ void ambe_subband_segs_advance(ambe_subband_segs *s, int count, int new_exp)
         s->exp[i] = (s->bound[i + 1] - s->bound[i] < 1)
                         ? (int16_t)AMBE_SEG_EMPTY : s->exp[i + 1];
     s->exp[AMBE_SEGS - 1] = (int16_t)new_exp;
+}
+
+/*
+ * ---- the stage assembled -------------------------------------------------
+ *
+ * Dsp_NormalizeArray in miniature: shift the block left until the largest
+ * magnitude is just below saturation, and report how far.  Block floats here
+ * are mantissa * 2^exp, so shifting left by s means the exponent falls by s.
+ */
+static short normalise_block(int16_t *dst, const int16_t *src, int n)
+{
+    int32_t mx = 0;
+    int shift = 0, i;
+
+    for (i = 0; i < n; i++) {
+        int32_t v = src[i] < 0 ? -(int32_t)src[i] : (int32_t)src[i];
+        if (v > mx) mx = v;
+    }
+    if (mx == 0) {
+        for (i = 0; i < n; i++) dst[i] = 0;
+        return 0;
+    }
+    while (mx < 0x4000 && shift < 15) { mx <<= 1; shift++; }
+    for (i = 0; i < n; i++)
+        dst[i] = (int16_t)((int32_t)src[i] << shift);
+    return (short)(-shift);
+}
+
+void ambe_subband_init(ambe_subband *s)
+{
+    int i;
+    memset(s, 0, sizeof(*s));
+    for (i = 0; i < AMBE_SEGS; i++) {
+        s->segs.bound[i] = AMBE_BAND_SEG;
+        s->segs.exp[i]   = (int16_t)AMBE_SEG_EMPTY;
+    }
+}
+
+int ambe_subband_process(ambe_subband *s,
+                         const int16_t history[AMBE_SUBBAND_HISTORY],
+                         int nframe, int32_t energy[16])
+{
+    /* the largest the scheduler can ask for, so nothing here is dynamic */
+    int16_t work[8 * AMBE_SUBBAND_MAX_OUT + AMBE_SUBBAND_OVERLAP];
+    int16_t sets[(AMBE_SUBBAND_HIST_SETS + 2 * AMBE_SUBBAND_MAX_OUT) * 16];
+    int16_t out[AMBE_SUBBAND_MAX_OUT];
+    int32_t bins32[32];
+    int16_t bins[32];
+    short   e_in;
+    int count, nsamp, off, nsets, set, c, o, i;
+
+    count = ambe_subband_advance(&s->acc, nframe, &nsamp, &off);
+    for (i = 0; i < 16; i++) energy[i] = 0;
+    if (count <= 0)
+        return 0;
+
+    e_in = normalise_block(work, history + off, nsamp);
+
+    /* the carried sets come first, then this call's */
+    memcpy(sets, s->hist, sizeof(s->hist));
+    nsets = 2 * count;
+    for (set = 0; set < nsets; set++) {
+        int16_t *dst = sets + (AMBE_SUBBAND_HIST_SETS + set) * 16;
+        ambe_subband_window(bins, work + 4 * set);
+        ambe_subband_dft32(bins);
+        for (i = 0; i < 16; i++) {
+            int32_t re = bins[2 * i], im = bins[2 * i + 1];
+            energy[i] += ((re * re + im * im) * 2) >> 7;
+        }
+        ambe_subband_magnitudes(dst, bins, e_in);
+    }
+    (void)bins32;
+
+    /* decimate, then slide each channel of the ring on by `count` */
+    for (c = 0; c < 16; c++) {
+        ambe_subband_decimate(out, sets, c, count);
+        memmove(&s->ring[c * AMBE_SUBBAND_RING],
+                &s->ring[c * AMBE_SUBBAND_RING] + count,
+                (size_t)(AMBE_SUBBAND_RING - count) * sizeof(int16_t));
+        for (o = 0; o < count; o++)
+            s->ring[c * AMBE_SUBBAND_RING + AMBE_SUBBAND_RING - count + o] =
+                out[o];
+    }
+
+    /* carry the last five sets, which is what the next call's decimator needs */
+    memcpy(s->hist, sets + nsets * 16, sizeof(s->hist));
+
+    ambe_subband_segs_advance(&s->segs, count, e_in);
+    s->primed = 1;
+    return count;
 }

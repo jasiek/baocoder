@@ -581,6 +581,84 @@ int main(void)
         printf("\n    segments  400 frames, 7 boundaries tile 58 exactly");
     }
 
+    /*
+     * The stage assembled, tested as what it is supposed to be: a filterbank.
+     *
+     * Every piece above is checked in isolation, which says nothing about
+     * whether they are wired together correctly - a transposed channel index,
+     * an off-by-one in the sample-set spacing or a mis-slid ring would all
+     * leave each piece passing.  So this drives real audio through
+     * ambe_subband_process and asks the one question that catches all of them:
+     * does a tone end up in the channel whose band contains it?
+     *
+     * Bin k of the 32-point transform is 250*k Hz at 8 kHz, so the tones sit
+     * on bin centres.  Placing them between bins would be asking which of two
+     * equal neighbours wins, which is arbitrary.
+     */
+    {
+        int16_t hist[AMBE_SUBBAND_HISTORY];
+        int32_t en[16];
+        int ch, hits = 0;
+
+        for (ch = 1; ch <= 15; ch++) {
+            ambe_subband st;
+            double f = 250.0 * ch;
+            long n0 = 0;
+            int64_t tot[16];
+            int fr, b, pk = 0;
+
+            ambe_subband_init(&st);
+            memset(hist, 0, sizeof(hist));
+            for (b = 0; b < 16; b++) tot[b] = 0;
+
+            for (fr = 0; fr < 40; fr++) {
+                memmove(hist, hist + 80,
+                        (AMBE_SUBBAND_HISTORY - 80) * sizeof(int16_t));
+                for (i = 0; i < 80; i++) {
+                    double v = 12000.0 * sin(2.0 * M_PI * f * (n0 + i) / 8000.0);
+                    hist[AMBE_SUBBAND_HISTORY - 80 + i] = (int16_t)v;
+                }
+                n0 += 80;
+                CHECK(ambe_subband_process(&st, hist, 80, en) > 0,
+                      "channel %d: the stage produced no samples\n", ch);
+                if (fr >= 20)          /* let the ring and history fill */
+                    for (b = 0; b < 16; b++) tot[b] += en[b] >> 8;
+            }
+            for (b = 1; b < 16; b++)
+                if (tot[b] > tot[pk]) pk = b;
+            CHECK(pk == ch,
+                  "a %.0f Hz tone peaked in channel %d, its band is %d\n",
+                  f, pk, ch);
+            if (pk == ch) hits++;
+
+            /*
+             * And the ring must actually carry that channel's envelope: a
+             * steady tone gives a steady magnitude, so the excited channel's
+             * ring should be well above the quiet ones.  A ring that was
+             * slid wrongly, or never written, would fail here while the
+             * energies above still passed.
+             */
+            {
+                long exc = 0, quiet = 0;
+                int qn = 0;
+                for (i = 0; i < AMBE_SUBBAND_RING; i++)
+                    exc += st.ring[ch * AMBE_SUBBAND_RING + i];
+                for (b = 0; b < 16; b++) {
+                    if (b == ch || b == ch - 1 || b == ch + 1) continue;
+                    for (i = 0; i < AMBE_SUBBAND_RING; i++)
+                        quiet += st.ring[b * AMBE_SUBBAND_RING + i];
+                    qn++;
+                }
+                CHECK(exc > 0 && (double)exc > 4.0 * (double)quiet / qn,
+                      "channel %d ring sums to %ld, the quiet channels "
+                      "average %ld - the ring is not carrying the band\n",
+                      ch, exc, qn ? quiet / qn : 0L);
+            }
+        }
+        printf("\n    stage     %d/15 tones land in their own channel, "
+               "ring carries them", hits);
+    }
+
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
            2 * 15 + 4 + 64, worst_abs);
     printf("\n                         ");
