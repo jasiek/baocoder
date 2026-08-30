@@ -171,11 +171,11 @@ int ambe_log2(int mant, int exp)
     t = mult_r(u, s16(t + ambe_log2_coeff_q15[2]));
     t = mult_r(u, s16(t + ambe_log2_coeff_q15[3]));
 
-    h = s16((((int32_t)ambe_log2_coeff_q15[4] << 16) + (t << 15)) >> 16);
+    h = s16((ambe_shl32(ambe_log2_coeff_q15[4], 16) + ambe_shl32(t, 15)) >> 16);
     t = mult_r(h, u);
 
-    return ((exp - (int)shift) << 16) +
-           (((t << 18) + ((int32_t)ambe_log2_coeff_q15[5] << 16)) >> 15);
+    return ambe_shl32(exp - (int)shift, 16) +
+           ((ambe_shl32(t, 18) + ambe_shl32(ambe_log2_coeff_q15[5], 16)) >> 15);
 }
 
 /* ----------------------------------------------------------------- pow2 */
@@ -202,17 +202,17 @@ int ambe_pow2(unsigned int log2v, short *exp_out)
 
     *exp_out = (short)((short)(log2v >> 16) + 1);
 
-    a = mult_r(u, ambe_pow2_coeff_q15[0]) << 13;
-    a = s16(((((int32_t)ambe_pow2_coeff_q15[1]) << 16) + a) >> 16);
-    a = mult_r(u, a) << 13;
-    a = s16(((((int32_t)ambe_pow2_coeff_q15[2]) << 15) + a) >> 16);
-    a = mult_r(u, a) << 14;
-    a = s16(((((int32_t)ambe_pow2_coeff_q15[3]) << 15) + a) >> 16);
-    a = mult_r(u, a) << 15;
-    a = s16(((((int32_t)ambe_pow2_coeff_q15[4]) << 16) + a) >> 16);
-    a = mult_r(a, u) << 15;
+    a = ambe_shl32(mult_r(u, ambe_pow2_coeff_q15[0]), 13);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[1], 16) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 13);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[2], 15) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 14);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[3], 15) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 15);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[4], 16) + a) >> 16);
+    a = ambe_shl32(mult_r(a, u), 15);
 
-    return a + (((int32_t)ambe_pow2_coeff_q15[5]) << 16);
+    return a + ambe_shl32(ambe_pow2_coeff_q15[5], 16);
 }
 
 /* ----------------------------------------------------------------- sqrt */
@@ -261,7 +261,7 @@ unsigned int ambe_sqrt(int mant, short *exp)
  */
 int ambe_cos_q15(int phase_q15turns)
 {
-    uint32_t u = (uint32_t)((phase_q15turns << 16) >> 6);
+    uint32_t u = (uint32_t)(ambe_shl32(phase_q15turns, 16) >> 6);
     uint32_t idx, frac;
     int32_t a, b;
 
@@ -313,7 +313,7 @@ ambe_bf ambe_bf_norm(ambe_bf a)
     sig = 32 - (int)ambe_lzcount32(m);       /* significant bits in |mant| */
     d = BF_BITS - sig;
     if (d > 0) {
-        a.mant = (int32_t)((int64_t)a.mant << d);
+        a.mant = (int32_t)ambe_shl64(a.mant, d);
         a.exp -= d;
     } else if (d < 0) {
         a.mant >>= -d;
@@ -389,7 +389,7 @@ ambe_bf ambe_bf_div(ambe_bf a, ambe_bf b)
         r.mant = 0; r.exp = 0;
         return r;
     }
-    r.mant = (int32_t)((((int64_t)a.mant) << BF_BITS) / b.mant);
+    r.mant = (int32_t)(ambe_shl64(a.mant, BF_BITS) / b.mant);
     r.exp  = a.exp - b.exp;
     return ambe_bf_norm(r);
 }

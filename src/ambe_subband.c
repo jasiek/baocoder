@@ -101,8 +101,10 @@ void ambe_subband_dft32(int16_t x[32])
         const short *cr = &ambe_subband_dft_q15[(k - 1) * 32];
         const short *ci = cr + 16;
         /* the j = 0 term, whose cosine is 1.0 and so will not fit in the
-           table's int16 - the stock code shifts it in by hand */
-        int64_t re = (int64_t)half0 << 15;
+           table's int16 - the stock code shifts it in by hand.  half0 goes
+           negative, so the shift runs on the unsigned pattern to stay
+           defined; the multiply it stands for is exact either way. */
+        int64_t re = ambe_shl64(half0, 15);
         int64_t im = 0;
 
         for (j = 0; j < 16; j++) {
@@ -424,7 +426,7 @@ static short normalise_block(int16_t *dst, const int16_t *src, int n)
     }
     while (mx < 0x4000 && shift < 15) { mx <<= 1; shift++; }
     for (i = 0; i < n; i++)
-        dst[i] = (int16_t)((int32_t)src[i] << shift);
+        dst[i] = (int16_t)ambe_shl32(src[i], shift);
     return (short)(-shift);
 }
 

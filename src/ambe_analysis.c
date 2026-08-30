@@ -477,7 +477,7 @@ void ambe_analyse_v(ambe_analysis *a, ambe_voicing *v,
                 /* ambe_log2 wants mant * 2^(exp - 15) */
                 lg = ambe_log2(v.mant >> 15, v.exp - 30 + 15 + 15);
                 /* Q16 log2 -> Q24, and undo the decoder's 0.693 for ln2 */
-                out->log2Ml[l] = (int32_t)((((int64_t)lg << (AMBE_Q_LOG - 16)) *
+                out->log2Ml[l] = (int32_t)((ambe_shl64(lg, AMBE_Q_LOG - 16) *
                                             K_LN2_OVER_0P693_Q30) >> 30);
             }
         }

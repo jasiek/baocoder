@@ -18,6 +18,28 @@
 #include <stdint.h>
 
 /*
+ * Left shift on the unsigned bit pattern.
+ *
+ * The stock code is ARM assembly and Thumb's LSL simply shifts the register,
+ * so its shifts run happily on negative values.  Transcribed into C that is
+ * undefined behaviour - C99 6.5.7p4 only defines E1 << E2 for a non-negative
+ * E1 - and the sanitiser build rightly objects, even though every compiler we
+ * target emits the shift the radio performs.  These say what the hardware does
+ * without asking the standard for something it does not promise: shift the
+ * bits, then read them back as signed, which is the same two's-complement
+ * pattern the ARM leaves in the register.
+ */
+static inline int32_t ambe_shl32(int32_t v, int n)
+{
+    return (int32_t)((uint32_t)v << n);
+}
+
+static inline int64_t ambe_shl64(int64_t v, int n)
+{
+    return (int64_t)((uint64_t)v << n);
+}
+
+/*
  * Signed divide, Math_SDiv 0x00018D74.  Returns 0 when |a| < |b| rather than
  * rounding, saturates the two extreme operands, and carries the sign through
  * an XOR of the inputs.

@@ -267,13 +267,13 @@ static short unpack_real(int32_t *buf, short scale_exp, int size_bits, int shift
     int i;
 
     if (shift == 0) {
-        int32_t r = ((int32_t)RE(buf[0]) << 16) >> 1;
-        int32_t m = ((int32_t)IM(buf[0]) << 16) >> 1;
+        int32_t r = ambe_shl32(RE(buf[0]), 16) >> 1;
+        int32_t m = ambe_shl32(IM(buf[0]), 16) >> 1;
         buf[0] = PACK((int16_t)((uint32_t)(m + r) >> 16),
                       (int16_t)((uint32_t)(r - m) >> 16));
     } else {
-        int32_t r = ((int32_t)RE(buf[0]) << 16) >> 1;
-        int32_t m = ((int32_t)IM(buf[0]) << 16) >> 1;
+        int32_t r = ambe_shl32(RE(buf[0]), 16) >> 1;
+        int32_t m = ambe_shl32(IM(buf[0]), 16) >> 1;
         buf[0]  = PACK((int16_t)((uint32_t)(m + r) >> 16), 0);
         top[0]  = PACK((int16_t)((uint32_t)(r - m) >> 16), 0);
     }

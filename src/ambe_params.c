@@ -161,6 +161,18 @@ static int bits_to_int(const uint8_t *d, const int *idx, int n)
     return v;
 }
 
+/*
+ * Q11 -> Q24, a left shift of thirteen that is exact for every table entry.
+ * The tables are signed and many entries are negative, and shifting a negative
+ * value left is undefined in C99, so the shift runs on the unsigned bit
+ * pattern - the same round-trip the rest of the fixed-point code uses - and
+ * comes back to int32_t with the value the stock code's shift produced.
+ */
+static int32_t q11_to_q24(int32_t v)
+{
+    return ambe_shl32(v, AMBE_Q_LOG - 11);
+}
+
 /* Bit positions of each quantiser index inside the 49-bit payload. */
 const int ambe_b0_idx[7] = {  0,  1,  2,  3, 37, 38, 39 };
 const int ambe_b1_idx[5] = {  4,  5,  6,  7, 35 };
@@ -293,20 +305,20 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
 
     /* ---- b2: differential frame gain.  Q11 -> Q24 is exact. */
     b2         = bits_to_int(ambe_d, B2_IDX, 5);
-    dgamma     = (int32_t)ambe_dg_q11[b2] << (AMBE_Q_LOG - 11);
+    dgamma     = q11_to_q24(ambe_dg_q11[b2]);
     cur->gamma = dgamma + ((prev->gamma + 1) >> 1);
 
     /* ---- b3/b4: PRBA vectors -> Ri via an 8-point inverse cosine transform */
     b3 = bits_to_int(ambe_d, B3_IDX, 9);
     b4 = bits_to_int(ambe_d, B4_IDX, 7);
     Gm[1] = 0;
-    Gm[2] = (int32_t)ambe_prba24_q11[b3 * 3 + 0] << (AMBE_Q_LOG - 11);
-    Gm[3] = (int32_t)ambe_prba24_q11[b3 * 3 + 1] << (AMBE_Q_LOG - 11);
-    Gm[4] = (int32_t)ambe_prba24_q11[b3 * 3 + 2] << (AMBE_Q_LOG - 11);
-    Gm[5] = (int32_t)ambe_prba58_q11[b4 * 4 + 0] << (AMBE_Q_LOG - 11);
-    Gm[6] = (int32_t)ambe_prba58_q11[b4 * 4 + 1] << (AMBE_Q_LOG - 11);
-    Gm[7] = (int32_t)ambe_prba58_q11[b4 * 4 + 2] << (AMBE_Q_LOG - 11);
-    Gm[8] = (int32_t)ambe_prba58_q11[b4 * 4 + 3] << (AMBE_Q_LOG - 11);
+    Gm[2] = q11_to_q24(ambe_prba24_q11[b3 * 3 + 0]);
+    Gm[3] = q11_to_q24(ambe_prba24_q11[b3 * 3 + 1]);
+    Gm[4] = q11_to_q24(ambe_prba24_q11[b3 * 3 + 2]);
+    Gm[5] = q11_to_q24(ambe_prba58_q11[b4 * 4 + 0]);
+    Gm[6] = q11_to_q24(ambe_prba58_q11[b4 * 4 + 1]);
+    Gm[7] = q11_to_q24(ambe_prba58_q11[b4 * 4 + 2]);
+    Gm[8] = q11_to_q24(ambe_prba58_q11[b4 * 4 + 3]);
 
     /*
      * cos(pi*(k-1)*(i-0.5)/8) is cos of (k-1)*(2i-1)/32 turns, and a turn is
@@ -341,13 +353,13 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     Ji[4] = ambe_lmprbl[L * 4 + 3];
 
     for (k = 3; k <= Ji[1]; k++)
-        Cik[1][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b5_q11[b5 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
+        Cik[1][k] = (k > 6) ? 0 : q11_to_q24(ambe_hoc_b5_q11[b5 * 4 + (k - 3)]);
     for (k = 3; k <= Ji[2]; k++)
-        Cik[2][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b6_q11[b6 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
+        Cik[2][k] = (k > 6) ? 0 : q11_to_q24(ambe_hoc_b6_q11[b6 * 4 + (k - 3)]);
     for (k = 3; k <= Ji[3]; k++)
-        Cik[3][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b7_q11[b7 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
+        Cik[3][k] = (k > 6) ? 0 : q11_to_q24(ambe_hoc_b7_q11[b7 * 4 + (k - 3)]);
     for (k = 3; k <= Ji[4]; k++)
-        Cik[4][k] = (k > 6) ? 0 : (int32_t)ambe_hoc_b8_q11[b8 * 4 + (k - 3)] << (AMBE_Q_LOG - 11);
+        Cik[4][k] = (k > 6) ? 0 : q11_to_q24(ambe_hoc_b8_q11[b8 * 4 + (k - 3)]);
 
     if (info) {
         info->b[1] = b1; info->b[2] = b2; info->b[3] = b3; info->b[4] = b4;
