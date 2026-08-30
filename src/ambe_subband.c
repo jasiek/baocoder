@@ -206,16 +206,48 @@ void ambe_subband_magnitudes(int16_t out[16], const int16_t bins[32], int e_in)
 }
 
 /*
- * WHAT IS NOT HERE YET.  The frame scheduling: a fractional resampler whose
- * accumulator lives at param_1 + 0x6DC, taking (accumulated + nFrameSize) / 8
- * groups per call and keeping the remainder, with 8 input samples yielding two
- * interleaved sample-sets and the decimator halving those to one output sample
- * per channel.  nFrameSize is clamped to [0x4C, 0x54] by
- * Vocoder_ProcessFrameFec 0x00016F3C and that runs twice per 20 ms frame, so
- * it is about 80 and the count is about 10 - which is why the output buffer is
- * 16 x 11 and why the ring's tail shifts by the returned count rather than by
- * a constant.
+ * The frame scheduling, from the prologue at 0x00023AAE.
+ *
+ * The stage consumes eight input samples per output sample per channel, but
+ * the caller's frame size is not a multiple of eight - Vocoder_ProcessFrameFec
+ * 0x00016F3C clamps it to [0x4C, 0x54], i.e. 76..84, and calls
+ * Vocoder_ProcessFrame twice per 20 ms frame.  So there is a fractional
+ * resampler: a remainder is carried at param_1 + 0x6DC and the count varies
+ * between calls, which is why the output buffer is 16 x 11 rather than 16 x 10
+ * and why Vocoder_AnalyzeSpectrum's tail shifts the ring by the returned count
+ * rather than by a constant.
+ *
+ * The clamp and the buffer size corroborate each other, which is the check
+ * that both were read right.  With a remainder of up to 7 carried in, a frame
+ * size f asks for at most (f + 7) / 8 outputs: at the clamp's maximum of 84
+ * that is exactly 11, the buffer's capacity, and it stays 11 up to f = 88 and
+ * overflows at 89.  So the clamp is what bounds the buffer, with a little
+ * margin rather than none.
+ *
+ * The 28 extra input samples are the 32-tap window's overlap: sample-sets step
+ * four samples apart, so beyond the 8 per output the window still reaches 32
+ * minus 4 = 28 samples back.
+ *
+ * The count is `sext r12,r0,0xf,0x3` at 0x00023ABC - an arithmetic shift, the
+ * same signed bitfield extract that Ghidra renders as `(v & 0x7fff) >> 3` and
+ * that this project has now met four times.  Here the value is a sample count
+ * and cannot be negative, so the two readings agree; it is transcribed as the
+ * instruction rather than as the rendering anyway, because the next one might
+ * not be so lucky.  Note the zexth before it, which is real: the accumulator
+ * and the frame size are summed as 16 bits and wrap there.
  */
+int ambe_subband_advance(int16_t *acc, int nframe, int *nsamp, int *offset)
+{
+    int total = (int)(uint16_t)((int)*acc + nframe);
+    int count = (int)(int16_t)total >> 3;
+    int rem   = total - count * 8;
+    int n     = count * 8 + AMBE_SUBBAND_OVERLAP;
+
+    *acc = (int16_t)rem;
+    if (nsamp)  *nsamp  = n;
+    if (offset) *offset = AMBE_SUBBAND_HISTORY - n - rem;
+    return count;
+}
 
 /*
  * The decimator, from the tail of Vocoder_AnalyzeSubbandSpectrum at

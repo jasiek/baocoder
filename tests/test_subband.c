@@ -313,6 +313,49 @@ int main(void)
         }
     }
 
+    /*
+     * The frame scheduler.  The property that matters is conservation: over a
+     * long run the samples consumed must equal the samples supplied, with the
+     * carried remainder accounting for the difference exactly.  A resampler
+     * that loses or duplicates a sample every few frames would still look
+     * plausible frame by frame and would drift the analysis window against the
+     * audio, which is the kind of fault that shows up much later as bad pitch.
+     *
+     * The second property is the buffer bound: the output is 16 x 11, so no
+     * frame size the caller can pass may ever ask for a twelfth sample.
+     */
+    {
+        int nf, worst_count = 0;
+        for (nf = 76; nf <= 84; nf++) {
+            int16_t acc = 0;
+            long supplied = 0, consumed = 0;
+            int f;
+            for (f = 0; f < 5000; f++) {
+                int nsamp = 0, off = 0;
+                int c = ambe_subband_advance(&acc, nf, &nsamp, &off);
+                supplied += nf;
+                consumed += 8 * c;
+                CHECK(c >= 0 && c <= AMBE_SUBBAND_MAX_OUT,
+                      "frame size %d asked for %d outputs, buffer holds %d\n",
+                      nf, c, AMBE_SUBBAND_MAX_OUT);
+                CHECK(acc >= 0 && acc < 8,
+                      "frame size %d left a remainder of %d\n", nf, acc);
+                CHECK(nsamp == 8 * c + AMBE_SUBBAND_OVERLAP,
+                      "frame size %d wants %d samples for %d outputs\n",
+                      nf, nsamp, c);
+                CHECK(off >= 0 && off + nsamp <= AMBE_SUBBAND_HISTORY,
+                      "frame size %d reads [%d,%d) of a %d-sample history\n",
+                      nf, off, off + nsamp, AMBE_SUBBAND_HISTORY);
+                if (c > worst_count) worst_count = c;
+            }
+            CHECK(consumed + acc == supplied,
+                  "frame size %d: supplied %ld, consumed %ld, carried %d\n",
+                  nf, supplied, consumed, acc);
+        }
+        printf("\n    schedule  76..84 x 5000 frames, exact conservation, "
+               "peak %d of %d", worst_count, AMBE_SUBBAND_MAX_OUT);
+    }
+
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
            2 * 15 + 4 + 64, worst_abs);
     printf("\n                         ");

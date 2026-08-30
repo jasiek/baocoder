@@ -52,4 +52,20 @@ void ambe_subband_decimate(int16_t *out, const int16_t *sets, int chan,
 void ambe_subband_magnitudes(int16_t out[16], const int16_t bins[32],
                              int e_in);
 
+/* The analysis history the stage reads, and the window overlap it keeps. */
+#define AMBE_SUBBAND_HISTORY 383   /* 0x17F, the caller's constant  */
+#define AMBE_SUBBAND_OVERLAP 28    /* 32-tap window less the 4-step */
+#define AMBE_SUBBAND_MAX_OUT 11    /* the 16 x 11 output buffer     */
+
+/*
+ * How many output samples per channel this call produces, and which input it
+ * needs.  `acc` is the fractional-resampler state (param_1 + 0x6DC), carried
+ * between calls; `nframe` is the caller's frame size, which
+ * Vocoder_ProcessFrameFec 0x00016F3C clamps to [76, 84].
+ *
+ * Writes the number of input samples to take to *nsamp and the offset into the
+ * history at which to take them to *offset; either may be NULL.
+ */
+int ambe_subband_advance(int16_t *acc, int nframe, int *nsamp, int *offset);
+
 #endif /* AMBE_SUBBAND_H */

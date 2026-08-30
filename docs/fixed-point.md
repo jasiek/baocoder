@@ -908,38 +908,24 @@ consequence of not having identified it.
 The analyser's voicing and pitch are the two open stages, and the work is now
 specified rather than exploratory.
 
-**What is already written.** `src/ambe_subband.c` carries four of the
-16-channel stage's six pieces, all checked in `tests/test_subband.c` against
+**What is already written.** `src/ambe_subband.c` carries **all six** of the
+16-channel stage's pieces, all checked in `tests/test_subband.c` against
 something other than themselves: the folded window, the 32-point real DFT
 (98 cases, worst 1.50 LSB against a direct DFT), the `|X|² × 2 >> 7` energy
 accumulation (Parseval to 0.01 %, which pins the two scale constants and the
 DFT's own together), and the 7-tap decimator (**0 LSB** against a reference
-convolution, and a constant passes through unchanged). All five of the stage's
-tables are extracted and asserted.
+convolution, and a constant passes through unchanged), the per-band magnitudes
+(1.50 LSB against |X|, and invariant to the input exponent, which is what pins
+the alignment), and the frame scheduler (exact sample conservation over 5000
+frames at every frame size the caller can pass, peaking at exactly the 11 the
+output buffer holds). All five of the stage's tables are extracted and
+asserted.
 
-1. **Finish `Vocoder_AnalyzeSubbandSpectrum`** — two pieces, neither of them
-   still a question of *what* it computes.
-
-   The **per-band magnitude** at `0x00023E3E`, unrolled sixteen times, turns
-   each frame's band energies into the channel samples the decimator filters.
-   It is `Math_Sqrt` `0x00019364` inlined, and `ambe_basop.c` already carries
-   that as `ambe_sqrt()` — verified coefficient by coefficient against
-   `0x18001618` — so this is a call, not a transcription. Band 0 is
-   special-cased as the real part clamped at zero, which it can be because
-   bin 0 has no imaginary part. What is left to pin is only the common output
-   exponent the sixteen magnitudes are aligned to (`sVar46` in the
-   decompilation, reassigned several times on the way down); that wants reading
-   against the disassembly, because Ghidra renders this block as goto soup with
-   a one-band pipeline offset.
-
-   The **frame scheduling** is a fractional resampler with its accumulator at
-   `param_1 + 0x6DC`: it takes `(accumulated + nFrameSize) / 8` groups per call
-   and keeps the remainder, 8 input samples yield two interleaved sample-sets,
-   and the decimator halves those to one output sample per channel. The output
-   buffer is 16 × 11 and the tail of `Vocoder_AnalyzeSpectrum` shifts each
-   channel of the ring down by the returned count and appends that many — so
-   11 is the per-frame *capacity*, not a fixed count, which is what the
-   fractional accumulator is there for.
+1. **`Vocoder_AnalyzeSubbandSpectrum` is done** — window, DFT, energy,
+   magnitude, decimator and scheduler, each checked against something other
+   than itself. What is left is to wire them into the loop the stock function
+   runs them in, and to hold the whole stage against the firmware; the pieces
+   themselves need no more reading of the image.
 2. **Then the eight-band loop** in `Vocoder_AnalyzeSpectrum` itself: eight bands
    at a 16-int32 stride writing 32 each (50 % overlap-add, exponent-aligned
    add), two 58-sample sub-frames per band folded through `ambe_subwin_q15`,
