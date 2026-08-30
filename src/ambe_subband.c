@@ -44,6 +44,7 @@
  * SPDX-License-Identifier: ISC
  */
 #include "ambe_subband.h"
+#include "ambe_basop.h"
 #include "ambe_tables.h"
 
 /*
@@ -139,43 +140,81 @@ void ambe_subband_frame(int32_t energy[16], int16_t bins[32],
 }
 
 /*
- * WHAT IS NOT HERE YET, and what is already known about it.
+ * The sixteen per-band magnitudes, from the block at 0x00023E3E - unrolled
+ * sixteen times there, and rendered by Ghidra as goto soup with a one-band
+ * pipeline offset, so this was read against the disassembly instead.
  *
- * Between the energy accumulation and the decimator the stock code turns each
- * frame's sixteen band energies into sixteen *magnitudes*, which are the
- * channel samples the decimator then filters.  That block is at 0x00023E3E and
- * following, unrolled sixteen times, and Ghidra renders it as goto soup with a
- * one-band pipeline offset - which is why it is not transcribed here yet
- * rather than because anything about it is unclear.
+ * The root is Math_Sqrt 0x00019364 inlined, which ambe_basop.c already carries
+ * as ambe_sqrt(): the instructions at 0x00023E4E..0x00023E7A are the same
+ * two-deep Horner in the normalised mantissa, the same sqrt(2) correction
+ * selected by the parity of the exponent, and the same (e + 1) >> 1.  So this
+ * is a call.
  *
- * The algorithm is settled: it is Math_Sqrt 0x00019364 inlined, and it is the
- * same function ambe_basop.c already carries as ambe_sqrt().  Checked
- * coefficient by coefficient against 0x18001618:
+ * The exponent bookkeeping is the part that needed the disassembly, and it
+ * turns out to say something simple.  Three stack slots are involved:
  *
- *   shift  = lzcount(e) - 1;   m = (e << shift) >> 16
- *   inner  = s16(c1 + mult_r(m, c0))
- *   horner = s16(c2 + mult_r(m, inner))
- *   out    = (exp & 1) ? mult_r(horner, c3) : horner
- *   exp    = (exp + 1) >> 1
+ *   sp+0x128  e_in, the exponent Dsp_NormalizeArray gave the input block
+ *   sp+0x4c   2*e_in, which is what the roots are taken against - the
+ *             energies are squares, so their exponent is doubled
+ *   sp+0x104  e_in again (r4), the exponent everything is aligned back to
  *
- * so this is a call, not a transcription.  Band 0 is special-cased: it is the
- * real part clamped at zero rather than a root, which it can be because bin 0
- * has no imaginary part.
+ * Halving 2*e_in and aligning to e_in is the identity, which is the point: a
+ * channel sample comes out in the same block-float units as the PCM that went
+ * in, so the decimator and the 16 x 49 ring never have to carry an exponent of
+ * their own.  That is the check on having read it right - any other value of
+ * r4 would leave the ring in units nothing downstream knows.
  *
- * What remains to be pinned is only the exponent bookkeeping - the common
- * output exponent the sixteen magnitudes are aligned to before the final
- * `(v << shift) + 0x8000 >> 16`, which the decompiler calls sVar46 and which is
- * reassigned several times on the way down.  That wants reading against the
- * disassembly rather than the decompiler.
+ * What comes out is |X[b]|, the plain bin magnitude, and that is worth stating
+ * because the code roots the *energy* |X|^2 * 2 and so looks like it should
+ * come out sqrt(2) too big.  It does not: ambe_sqrt returns its mantissa
+ * carrying a factor of 1/sqrt(2), which cancels the 2 exactly.  Measured
+ * against libm the ratio is 0.70711 at every input, not approximately.
  *
- * The frame scheduling is the other open piece: a fractional resampler whose
+ * Band 0 is not a root.  Bin 0 of a real DFT has no imaginary part, so its
+ * magnitude is just its real part, and the stock code clamps it at zero rather
+ * than taking an absolute value - a negative DC becomes silence, not a
+ * reflection.  That it lands on the same definition as the other fifteen, with
+ * no root and no scaling, is the check that the 2 and the 1/sqrt(2) were both
+ * read correctly; getting either wrong would leave band 0 inconsistent with
+ * its neighbours by sqrt(2).
+ */
+void ambe_subband_magnitudes(int16_t out[16], const int16_t bins[32], int e_in)
+{
+    int b;
+
+    out[0] = bins[0] > 0 ? bins[0] : 0;
+
+    for (b = 1; b < 16; b++) {
+        int32_t re = bins[2 * b], im = bins[2 * b + 1];
+        int32_t e2 = (re * re + im * im) * 2;
+        short   e  = (short)(2 * e_in);
+        uint32_t m;
+        int sh;
+
+        if (e2 <= 0) { out[b] = 0; continue; }
+        m  = ambe_sqrt(e2, &e);          /* e becomes (2*e_in - shift + 1) >> 1 */
+        sh = (int)e - e_in;
+        /* the stock code carries the root in the high half and rounds on the
+           way back down, which is what the + 0x8000 before the >> 16 is */
+        if (sh >= 0)
+            out[b] = (int16_t)((int32_t)(((m << 16) << sh) + 0x8000) >> 16);
+        else if (-sh < 32)
+            out[b] = (int16_t)((int32_t)(((m << 16) >> -sh) + 0x8000) >> 16);
+        else
+            out[b] = 0;
+    }
+}
+
+/*
+ * WHAT IS NOT HERE YET.  The frame scheduling: a fractional resampler whose
  * accumulator lives at param_1 + 0x6DC, taking (accumulated + nFrameSize) / 8
  * groups per call and keeping the remainder, with 8 input samples yielding two
  * interleaved sample-sets and the decimator halving those to one output sample
- * per channel.  The output buffer is 16 x 11, and the tail of
- * Vocoder_AnalyzeSpectrum shifts each channel of the 16 x 49 ring down by the
- * returned count and appends that many - so 11 is the per-frame capacity, not
- * a fixed count.
+ * per channel.  nFrameSize is clamped to [0x4C, 0x54] by
+ * Vocoder_ProcessFrameFec 0x00016F3C and that runs twice per 20 ms frame, so
+ * it is about 80 and the count is about 10 - which is why the output buffer is
+ * 16 x 11 and why the ring's tail shifts by the returned count rather than by
+ * a constant.
  */
 
 /*

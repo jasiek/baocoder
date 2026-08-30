@@ -138,6 +138,77 @@ int main(void)
     }
 
     /*
+     * The per-band magnitudes.  Two properties, and the second is the one that
+     * says the exponent bookkeeping was read right.
+     *
+     * First, they are |X[b]| - the plain bin magnitude.  That is not obvious
+     * from the code, which roots the energy |X|^2 * 2: ambe_sqrt returns its
+     * mantissa carrying a factor of 1/sqrt(2), and that cancels the 2 exactly.
+     * The confirmation is band 0, which takes no root at all and is just the
+     * real part - so all sixteen bands agree on one definition, which they
+     * would not if either the 2 or the 1/sqrt(2) had been misread.
+     *
+     * Second, and this is the check that pins r4, they are *invariant to the
+     * input exponent*.  The stock code takes the roots against 2*e_in and
+     * aligns the results back to e_in, which is the identity - so a channel
+     * sample carries the units the PCM did, and feeding the same spectrum with
+     * a different e_in must give the same magnitudes.  Any other alignment
+     * would leave the 16 x 49 ring in units nothing downstream knows, and this
+     * is what would catch it.
+     */
+    {
+        int16_t bins[32], mag[16], mag2[16];
+        double worst = 0.0;
+        int b, trial;
+        uint32_t s2 = 7u;
+
+        for (trial = 0; trial < 32; trial++) {
+            for (i = 0; i < 32; i++) {
+                s2 = s2 * 1103515245u + 12345u;
+                x[i] = (int16_t)((int32_t)((s2 >> 16) & 0xffff) - 32768) / 8;
+            }
+            memcpy(bins, x, sizeof(bins));
+            ambe_subband_window(bins, bins);
+            ambe_subband_dft32(bins);
+
+            ambe_subband_magnitudes(mag, bins, 0);
+
+            /* the roots themselves: plain |X[b]|, see below */
+            for (b = 1; b < 16; b++) {
+                double re = bins[2 * b], im = bins[2 * b + 1];
+                double want = sqrt(re * re + im * im);
+                double d = fabs((double)mag[b] - want);
+                if (d > worst) worst = d;
+                /*
+                 * The bar is absolute, not relative.  The output is a 16-bit
+                 * integer, so one count of disagreement is unavoidable, and on
+                 * a small magnitude that is several percent - quoting a
+                 * relative figure would be quoting the quantiser.  What is
+                 * asserted is the radio's own sqrt accuracy (1.3e-3 relative,
+                 * see the basic-operator table) plus that one count.
+                 */
+                CHECK(d <= 1.0 + 1.3e-3 * want,
+                      "magnitude[%d] = %d, |X| is %.2f (off by %.2f)\n",
+                      b, mag[b], want, d);
+            }
+            /* band 0 is the clamped real part, never a root */
+            CHECK(mag[0] == (bins[0] > 0 ? bins[0] : 0),
+                  "magnitude[0] = %d, want the clamped bin-0 real part %d\n",
+                  mag[0], bins[0]);
+
+            /* invariant to the input exponent */
+            for (b = 0; b < 4; b++) {
+                ambe_subband_magnitudes(mag2, bins, b * 3);
+                CHECK(memcmp(mag, mag2, sizeof(mag)) == 0,
+                      "magnitudes change with e_in = %d - the alignment is "
+                      "not the identity it must be\n", b * 3);
+            }
+        }
+        printf("\n    magnitude 32 frames, worst %.2f LSB vs |X|, "
+               "invariant to e_in", worst);
+    }
+
+    /*
      * The window's gain, which is the other half of the "stage is unity"
      * claim: 32 folded taps applied to a constant must scale it by 16.
      */

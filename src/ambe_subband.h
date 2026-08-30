@@ -42,4 +42,14 @@ void ambe_subband_frame(int32_t energy[16], int16_t bins[32],
 void ambe_subband_decimate(int16_t *out, const int16_t *sets, int chan,
                            int nout);
 
+/*
+ * The sixteen per-band magnitudes of one transformed frame - the channel
+ * samples the decimator filters.  `bins` is the output of ambe_subband_dft32
+ * and `e_in` the block-float exponent the input samples were normalised to;
+ * the magnitudes come back aligned to that same exponent, so a channel sample
+ * carries the units the PCM did.
+ */
+void ambe_subband_magnitudes(int16_t out[16], const int16_t bins[32],
+                             int e_in);
+
 #endif /* AMBE_SUBBAND_H */
