@@ -933,15 +933,19 @@ asserted.
    by segment reversal) and `ambe_band_add` (the exponent-aligned add, exact to
    1e-6 relative).
 
-   What is left is the **segment-exponent bookkeeping**, and this is the one
-   place left in the analyser where reading is still needed. The 58 samples a
-   channel contributes are not one block: they span several past frames, each
-   normalised with its own exponent, and the loop at `0x00020894` walks seven
-   segments — boundaries at `param_1 + 0x62E..0x63A`, exponents at
-   `param_1 + 0x310` — shifting each down to the common maximum that
-   `Math_ArrayMax(param_1 + 0x310, 7)` picks. That state is maintained by
-   `Vocoder_AnalyzeSubbandSpectrum`'s prologue (the `0x620..0x63A` shuffle),
-   so the two stages have to be read together rather than separately.
+   The **segment bookkeeping** is written too: `ambe_subband_segs_advance` is
+   the seven-deep shift register from the prologue at `0x00023AE6` — boundaries
+   at `param_1 + 0x62E..0x63A` dropping by the frame's sample count and
+   clamping at zero, exponents at `0x620..0x62C` shifting with them, and
+   `0x8000` written as a sentinel where a segment has been squeezed to nothing.
+   Tested by the invariant that the seven segments tile the 58-sample window
+   exactly, over 400 frames of varying size.
+
+   What is left is **assembly, not reading**: running these in the loop the
+   stock function runs them in, driving the eight bands from the 16 × 49 ring
+   through `Math_ArrayMax(param_1 + 0x310, 7)`'s common exponent, and holding
+   the whole stage against the firmware. Every piece it needs now exists and is
+   checked.
 3. **The voicing rule** is fully read — per band, `E_harm/E_total > 0.80` with
    `pitch` = this library's `f0` (Q19) shifted right by two, and a per-band
    octave alternative above 200 Hz — but **do not expect it to fix voicing**,

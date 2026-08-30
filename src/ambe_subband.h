@@ -100,4 +100,29 @@ short ambe_band_spectrum(int32_t magsq[32], const int16_t seg[58], short exp);
 short ambe_band_add(int32_t dst[32], const int32_t a[32], short ea,
                     const int32_t b[32], short eb);
 
+
+/* ---- the segment bookkeeping ---------------------------------------------
+ *
+ * The 58 samples a channel contributes to a band are not one block: they span
+ * several past calls, each normalised with its own exponent.  The state is a
+ * seven-deep shift register, boundaries at param_1 + 0x62E..0x63A and their
+ * exponents at 0x620..0x62C, advanced once per call.
+ */
+
+#define AMBE_SEGS       7
+#define AMBE_SEG_EMPTY  (-32768)   /* the 0x8000 the stock code writes */
+
+typedef struct {
+    int16_t bound[AMBE_SEGS];  /* where each segment starts, within the 58 */
+    int16_t exp[AMBE_SEGS];    /* its exponent, or AMBE_SEG_EMPTY          */
+} ambe_subband_segs;
+
+/*
+ * Advance the register by one call: every boundary moves down by `count` and
+ * clamps at zero, a new segment of `count` samples enters at the top carrying
+ * `new_exp`, and any segment that has been squeezed to nothing has its
+ * exponent replaced by AMBE_SEG_EMPTY.
+ */
+void ambe_subband_segs_advance(ambe_subband_segs *s, int count, int new_exp);
+
 #endif /* AMBE_SUBBAND_H */

@@ -525,6 +525,62 @@ int main(void)
                worst);
     }
 
+    /*
+     * The segment shift register.  What must hold is that the seven segments
+     * always tile the 58-sample window exactly: boundaries non-decreasing,
+     * the newest starting at 58 - count, and the oldest at 0 once the history
+     * has filled.  If they ever failed to tile, the eight-band loop would
+     * shift some stretch of samples by the wrong exponent - which produces a
+     * spectrum that still looks like a spectrum, so nothing downstream would
+     * catch it.
+     *
+     * The emptiness sentinel is checked too: a segment squeezed to zero width
+     * must carry AMBE_SEG_EMPTY and not a stale exponent, since the loop keys
+     * off that to skip it rather than shifting by 32768.
+     */
+    {
+        ambe_subband_segs sg;
+        int16_t acc = 0;
+        int f, k, nf, filled = 0;
+
+        memset(&sg, 0, sizeof(sg));
+        for (k = 0; k < AMBE_SEGS; k++) sg.exp[k] = AMBE_SEG_EMPTY;
+
+        for (f = 0; f < 400; f++) {
+            int count;
+            nf = 76 + (f % 9);
+            count = ambe_subband_advance(&acc, nf, NULL, NULL);
+            ambe_subband_segs_advance(&sg, count, f % 7);
+
+            CHECK(sg.bound[AMBE_SEGS - 1] == AMBE_BAND_SEG - count,
+                  "newest segment starts at %d, want %d\n",
+                  sg.bound[AMBE_SEGS - 1], AMBE_BAND_SEG - count);
+            for (k = 1; k < AMBE_SEGS; k++)
+                CHECK(sg.bound[k] >= sg.bound[k - 1],
+                      "frame %d: boundaries out of order at %d (%d < %d)\n",
+                      f, k, sg.bound[k], sg.bound[k - 1]);
+            for (k = 0; k < AMBE_SEGS; k++)
+                CHECK(sg.bound[k] >= 0 && sg.bound[k] <= AMBE_BAND_SEG,
+                      "frame %d: boundary %d = %d outside the window\n",
+                      f, k, sg.bound[k]);
+            /* a zero-width segment must be flagged, not left stale */
+            for (k = 0; k < AMBE_SEGS - 1; k++)
+                if (sg.bound[k + 1] - sg.bound[k] < 1)
+                    CHECK(sg.exp[k] == AMBE_SEG_EMPTY,
+                          "frame %d: segment %d is empty but carries "
+                          "exponent %d\n", f, k, sg.exp[k]);
+            if (f > 16) {
+                CHECK(sg.bound[0] == 0,
+                      "frame %d: oldest segment starts at %d, not 0 - the "
+                      "history has stopped covering the window\n",
+                      f, sg.bound[0]);
+                filled++;
+            }
+        }
+        CHECK(filled > 300, "only %d settled frames\n", filled);
+        printf("\n    segments  400 frames, 7 boundaries tile 58 exactly");
+    }
+
     printf("\n    dft32     %d cases, worst %.2f LSB vs a direct DFT",
            2 * 15 + 4 + 64, worst_abs);
     printf("\n                         ");

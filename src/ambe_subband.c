@@ -353,3 +353,50 @@ short ambe_band_add(int32_t dst[32], const int32_t a[32], short ea,
         dst[j] = (shift[j] >> d) + keep[j];
     return e;
 }
+
+/*
+ * The segment shift register, from the prologue at 0x00023AE6..0x00023C20.
+ *
+ * A channel's 58-sample segment is assembled from several calls' worth of
+ * output, and each call's data was normalised to its own block-float exponent.
+ * Rather than renormalise the whole history every time, the stock code
+ * remembers where each call's contribution starts and what exponent it
+ * carries, and the eight-band loop shifts each stretch down to a common
+ * maximum on the way into the transform.
+ *
+ * Per call every boundary drops by `count` - the number of new samples - and
+ * clamps at zero as the oldest data falls off the front; the array shifts one
+ * slot down; and the newest segment enters at the top starting at 58 - count.
+ * An exponent whose segment has been squeezed to zero width is replaced by
+ * 0x8000, which is -32768 read as a short: a sentinel, not an exponent, and
+ * the eight-band loop skips those stretches rather than shifting by 32768.
+ *
+ * Ghidra types the newest exponent slot at 0x62C as an `int`, which would
+ * overlap the first boundary at 0x62E.  It does not: every access in the
+ * disassembly is ld.h/st.h.  The one genuine word access is the comparison at
+ * 0x00023C80, which reads 0x62C and 0x62E together and so only ever takes the
+ * "unchanged, just copy" fast path when both halves match; the slow path is
+ * Math_ArrayShiftSaturate from the old exponent to the new, which is the
+ * identity when they are equal, so the two are equivalent and always
+ * re-aligning is correct.
+ */
+void ambe_subband_segs_advance(ambe_subband_segs *s, int count, int new_exp)
+{
+    int i;
+
+    for (i = 0; i < AMBE_SEGS - 1; i++) {
+        int b = (int)s->bound[i + 1] - count;
+        s->bound[i] = (int16_t)(b < 0 ? 0 : b);
+    }
+    s->bound[AMBE_SEGS - 1] = (int16_t)(AMBE_BAND_SEG - count);
+
+    /*
+     * The exponents shift with them, and the emptiness test is made against
+     * the *new* boundaries - a segment whose start has caught up with the next
+     * one no longer covers any samples.
+     */
+    for (i = 0; i < AMBE_SEGS - 1; i++)
+        s->exp[i] = (s->bound[i + 1] - s->bound[i] < 1)
+                        ? (int16_t)AMBE_SEG_EMPTY : s->exp[i + 1];
+    s->exp[AMBE_SEGS - 1] = (int16_t)new_exp;
+}
