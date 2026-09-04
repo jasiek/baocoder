@@ -278,11 +278,16 @@ when the return is `AMBE_FRAME_VOICE`, and the header says so.
 
 ### What is left, and it is one layer
 
-* **The spectral amplitudes, 1.15 dB.** Uniform now — the same at every
-  distance from a non-voice frame, and flat with depth below the frame's peak
-  until the last few bits, so it is neither a transient nor the fixture's int16
-  precision. A real difference in the envelope chain, and the next thing to
-  chase.
+* **The spectral amplitudes, 1.15 dB** — a fixed spectral tilt, flat below
+  `0.6 L` and ramping to +2.8 dB at the top harmonic, at full magnitude on the
+  first frame of a capture. `docs/amplitude-gap.md` has the chase: it is not the
+  enhancement (the firmware's is `Vocoder_MatchExcitationEnergy 0x000277F8`, and
+  ablating it from both sides leaves the residual unchanged), not the
+  enhancement's parameters, not the resample ratio, not the `Ri -> Cik`
+  rotation — and the firmware's envelope decoder
+  (`Vocoder_CodeSpectralCoefficients 0x000220D4`) has been read end to end and
+  agrees with `src/ambe_params.c` at every step. What is left unread is the
+  log2 -> linear conversion and the gain lookup.
 * **What the radio parks on a non-voice frame**, 0.345 log2 and flat across a
   run. This decoder synthesises comfort noise from the frame's own decoded
   envelope; the radio's array is something else. It is a separate question from
