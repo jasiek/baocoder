@@ -47,6 +47,12 @@ ambe_encode: tools/ambe_encode.c $(LIB)
 tools/dmra_decrypt: tools/dmra_decrypt.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
+# The firmware fixtures (tests/fixtures/*.fw*) are produced by executing the
+# radio's own decoder, which needs the baofeng-dm32uv-reveng checkout and its
+# Ghidra install: tools/fw_oracle/README.md.
+tools/fw_oracle/bits_to_frames: tools/fw_oracle/bits_to_frames.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
+
 tests/%: tests/%.c $(LIB) tests/testutil.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Itests $< $(LIB) $(LDLIBS) -o $@
 

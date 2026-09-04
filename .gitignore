@@ -11,3 +11,4 @@ tools/dmra_decrypt
 # test binaries; the sources next to them are kept
 tests/test_*
 !tests/test_*.c
+tools/fw_oracle/bits_to_frames
