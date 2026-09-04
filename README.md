@@ -16,7 +16,7 @@ test against; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 801 718 checks against known-good vectors, plus the integer-only check
+make test     # 1 111 834 checks against known-good vectors, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -185,6 +185,50 @@ The frame geometry falls straight out of `Vocoder_DescrambleVoiceFrame`
 for the first 12-bit field and 11 for the second: 12 + 12 + 25 payload bits
 become 24 + 23 + 25 = 72 on-air bits.
 
+## Where this decoder and mbelib disagree on purpose
+
+Two branches of the stock decoder have no counterpart in mbelib, and this
+library follows the radio. Both were found by running the firmware's own decoder
+under the p-code emulator in `baofeng-dm32uv-reveng` and feeding it the same
+49-bit payloads as this library, frame for frame, over all six captures.
+
+**The pitchless branch.** `Vocoder_DecodeAmbeFrame` `0x0002033C` does not always
+call the pitch decoder. `Vocoder_DecodePitchlessGainMode` `0x00027EF0` returns 1
+exactly when, over the voicing word, `(w & 0x55555555) == 0` and
+`(w & 0xAAAAAAAA) != 0` — no band voiced, and at least one crumb in the high-bit
+state — and the frame then gets `f0 = 0x1079`, `L = 56` written directly, with
+`b0` never read. So the second bit of each voicing crumb is not decorative: `01`
+is voiced, `10` selects this parameterisation. **132 of the corpus's 1 664 voice
+frames** take it, and the condition predicts every one with no false positives.
+
+**`b0 >= 120` is one case, not three.** `Vocoder_DecodePitchIndex` `0x00022B78`'s
+non-voiced path writes the fixed `0x4027` / `L = 15` for every index in that
+range — silence, erasure and tone alike. mbelib uses PI/32 with `L = 14`;
+mbelib-neo and JMBE use 15 for `b0 = 124` and 14 for 125. The radio makes no such
+distinction. **388 frames.**
+
+Scored against the firmware over the six captures, every layer above the
+amplitudes is exact:
+
+| | |
+|---|---|
+| 49-bit payload, every bit | **2 052 / 2 052** |
+| harmonic count `L` | **2 052 / 2 052** |
+| fundamental `f0`, Q19 | **2 052 / 2 052** |
+| voicing, per harmonic | **71 977 / 71 977** |
+
+`b0` is not recoverable on a pitchless frame — the decoder never reads it, so no
+information about it survives into the parameters — which is why the encoder
+mirrors the branch instead of inverting it, and why `test_encode_sweep` counts
+those frames rather than demanding the index back.
+
+The cost is against mbelib, which has neither branch. The envelope is predicted
+from the previous frame damped by 0.65, so each such frame seeds a state
+difference the two decoders then carry: measured, it decays **3.9e-01 to 6.8e-03
+over twelve frames**, at exactly that rate. `test_params` asserts the decay
+rather than the endpoint, because drift would mean a wrong coefficient where
+this means a different starting point.
+
 ## The arithmetic is fixed point, like the radio's
 
 The DM-32UV has no FPU. Its toolchain was configured soft-float and the vocoder
@@ -239,11 +283,11 @@ independent implementations:
 | `test_basop` | the firmware's log2, pow2, sqrt and cos swept across their **whole** input domains against libm, plus log2's coefficients against the Taylor series they turn out to be | 10 621 checks; cos 6.1e-5, log2 2.6e-3, pow2 1.2e-4, sqrt 1.3e-3 — the radio's accuracies, not this code's |
 | `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 123 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` **4.8e-5** / `L` **120/120** |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
-| `test_params` | per frame against mbelib: `L`, every voicing decision and the classification **exactly**; `w0`, gain and amplitudes bounded, since the decoder now uses the radio's law and Q11 tables where mbelib uses its float reconstruction | 12 450 checks; worst dev w0 **3.1e-6**, γ 2.7e-4, Ml 5.1e-3; **0** L divergences |
-| `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.989**, level ratio **0.999** |
+| `test_params` | per frame against mbelib: every voicing decision and the classification **exactly**; `w0`, `L`, gain and amplitudes bounded, since the decoder follows the radio where the two disagree — see *Where this decoder and mbelib disagree on purpose* | 12 402 checks; worst dev w0 **4.7e-4**, γ 2.7e-4, Ml 6.8e-3; 111 `L` divergences, all of them b0 ≥ 120; 5 pitchless frames skipped |
+| `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.975**, level ratio **1.000** |
 | `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.966** across six captures |
 | `test_encode` | decode 2 052 real frames from six captures to parameters, re-quantise, demand the radio's own bits back | **1 354/1 664** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
-| `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames |
+| `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames; 1 783 frames where `b0` is unrecoverable because the voicing pattern selected the pitchless branch |
 | `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **173/191**, **1** octave error, level ×0.93 |
 
 `test_params` is the load-bearing pipeline test. The AMBE spectral envelope is
