@@ -11,12 +11,14 @@ that firmware with the stock function and address cited at every block.
 
 It grew out of `baofeng-dm32uv-reveng`, the Ghidra reverse-engineering project
 for that radio, which holds the program database, the rename ledger and the
-findings this codec rests on. mbelib and JMBE are used here only as oracles to
-test against; no code or data from either ships in the library.
+findings this codec rests on — and which can now *run* the stock decoder under a
+p-code emulator, so the test oracle is the radio itself rather than another
+reimplementation of the specification. mbelib and JMBE are measured against the
+same frames; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 1 111 834 checks against known-good vectors, plus the integer-only check
+make test     # 1 188 219 checks against the radio's own decoder, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -185,49 +187,98 @@ The frame geometry falls straight out of `Vocoder_DescrambleVoiceFrame`
 for the first 12-bit field and 11 for the second: 12 + 12 + 25 payload bits
 become 24 + 23 + 25 = 72 on-air bits.
 
-## Where this decoder and mbelib disagree on purpose
+## The oracle is the radio, and mbelib is a measurement
 
-Two branches of the stock decoder have no counterpart in mbelib, and this
-library follows the radio. Both were found by running the firmware's own decoder
-under the p-code emulator in `baofeng-dm32uv-reveng` and feeding it the same
-49-bit payloads as this library, frame for frame, over all six captures.
+The reference for this decoder is the firmware's own, **executed**. The
+`baofeng-dm32uv-reveng` project runs `Vocoder_TxTask 0x0002EC30` out of the
+DM-32UV image under Ghidra's p-code emulator; `tests/fixtures/*.fwparms`,
+`*.fwamps` and `*.fwpcm` are what it produced for the same 2 052 payloads these
+fixtures carry, and `tests/test_firmware.c` compares against them frame by
+frame. mbelib and JMBE are still here, but as a *measurement* of the reference
+open-source decoders, not as the definition of correct.
+
+| against the firmware's own decoder | |
+|---|---|
+| 49-bit payload, every bit | **2 052 / 2 052** |
+| frame classification | **2 052 / 2 052** |
+| harmonic count `L` | **2 052 / 2 052** |
+| fundamental `f0`, Q19, exact | **2 052 / 2 052** |
+| voicing, per harmonic | **71 977 / 71 977** |
+| spectral amplitudes | 1.1 dB settled, not exact |
+| synthesised audio, 16-band spectrum | 0.970 mean correlation |
+
+The payload comparison needs one fixed permutation, because the firmware's
+buffer is in **field order** — `b0`(7) `b1`(5) `b2`(5) `b3`(9) `b4`(7) `b5`(5)
+`b6`(4) `b7`(4) `b8`(3), contiguous — where `ambe_d[]` is mbelib's scattered
+order. That map was measured, not assumed: 49 one-hot payloads pushed through
+the firmware, each producing exactly one output bit.
+
+### Three places the radio does something mbelib does not
 
 **The pitchless branch.** `Vocoder_DecodeAmbeFrame` `0x0002033C` does not always
 call the pitch decoder. `Vocoder_DecodePitchlessGainMode` `0x00027EF0` returns 1
 exactly when, over the voicing word, `(w & 0x55555555) == 0` and
-`(w & 0xAAAAAAAA) != 0` — no band voiced, and at least one crumb in the high-bit
+`(w & 0xAAAAAAAA) != 0` — no band voiced, at least one crumb in the high-bit
 state — and the frame then gets `f0 = 0x1079`, `L = 56` written directly, with
-`b0` never read. So the second bit of each voicing crumb is not decorative: `01`
-is voiced, `10` selects this parameterisation. **132 of the corpus's 1 664 voice
-frames** take it, and the condition predicts every one with no false positives.
+`b0` never read. The second bit of each voicing crumb is therefore not
+decorative: `01` is voiced, `10` selects this parameterisation. **132 of 1 664
+voice frames**, and the condition predicts every one with no false positives.
+At `b0 = 0` computing the fundamental from `b0` instead is a 6.2x error in `f0`
+and `L` wrong by 47.
 
 **`b0 >= 120` is one case, not three.** `Vocoder_DecodePitchIndex` `0x00022B78`'s
-non-voiced path writes the fixed `0x4027` / `L = 15` for every index in that
+non-voiced path writes the fixed `0x4027` / `L = 15` for every index in the
 range — silence, erasure and tone alike. mbelib uses PI/32 with `L = 14`;
-mbelib-neo and JMBE use 15 for `b0 = 124` and 14 for 125. The radio makes no such
-distinction. **388 frames.**
+mbelib-neo and JMBE use 15 for `b0 = 124` and 14 for 125. **388 frames.**
 
-Scored against the firmware over the six captures, every layer above the
-amplitudes is exact:
+**`b3` and `b4`'s low bits are not where mbelib puts them.**
+
+|  | b3 (9 bits) | b4 (7 bits) |
+|---|---|---|
+| mbelib, JMBE | `d[12..19]`, `d[40]` | `d[20..23]`, `d[41] d[42] d[43]` |
+| the radio | `d[12..19]`, **`d[43]`** | `d[20..23]`, **`d[40] d[41] d[42]`** |
+
+This is the permutation above, read at the two field boundaries where it does
+not agree with mbelib — the other seven reproduce `ambe_b*_idx[]` unchanged. It
+is corroborated independently by the amplitudes: adopting it takes the median
+per-frame residual against the firmware's own decoded spectrum from **2.58 dB to
+1.44 dB**, and the frames where the two readings happen to coincide improve as
+well, which is what a predictive envelope requires — a wrong index contaminates
+the frames that follow it.
+
+A fourth difference is a convention rather than a disagreement: mbelib folds the
+unvoiced gain `0.2046/sqrt(w0)` into the amplitudes, and the radio does not —
+fitting its own unvoiced factor as `k*w0^p` over the emulated corpus gives
+`p = -0.004`, `R^2 = 0.0000`, flat. So `ambe_apply_unvoiced_gain` runs after
+`ambe_enhance_spectrum` instead, which also matters because that stage
+renormalises to the frame's energy. Worth another 1.44 dB -> 1.18 dB.
+
+### What is left, and it is one layer
+
+The spectral amplitudes are not at parity. Two components, both measured:
+
+* **1.1 dB settled.** Flat with depth below the frame's peak until the last few
+  bits, so it is not the fixture's int16 precision — a real difference in the
+  envelope chain.
+* **A transient after every non-voice frame**, decaying at the codec's own 0.65
+  damping: 1.12 log2 one frame after, 0.19 by the eighth. The radio does
+  something on the `b0 >= 120` path this decoder does not reproduce yet, and
+  `test_firmware` scores the two populations separately so neither hides the
+  other.
+
+### How the external decoders do on the same frames
 
 | | |
 |---|---|
-| 49-bit payload, every bit | **2 052 / 2 052** |
-| harmonic count `L` | **2 052 / 2 052** |
-| fundamental `f0`, Q19 | **2 052 / 2 052** |
-| voicing, per harmonic | **71 977 / 71 977** |
+| mbelib, on the 242 frames of `dm32_arc4_1` whose model it shares | `w0` to 3.1e-6, gamma 2.6e-4, `L` 242/242, voicing **10 006 / 10 006** exact |
+| mbelib, spectral amplitudes | **11.8% mean** apart — the `b3`/`b4` assignment |
+| mbelib, synthesised audio vs the radio's | 0.968 mean band correlation (this decoder: 0.970) |
+| JMBE / SDRTrunk, `expected.wav` vs this decoder | 0.954 mean band correlation over six captures |
 
-`b0` is not recoverable on a pitchless frame — the decoder never reads it, so no
-information about it survives into the parameters — which is why the encoder
-mirrors the branch instead of inverting it, and why `test_encode_sweep` counts
-those frames rather than demanding the index back.
-
-The cost is against mbelib, which has neither branch. The envelope is predicted
-from the previous frame damped by 0.65, so each such frame seeds a state
-difference the two decoders then carry: measured, it decays **3.9e-01 to 6.8e-03
-over twelve frames**, at exactly that rate. `test_params` asserts the decay
-rather than the endpoint, because drift would mean a wrong coefficient where
-this means a different starting point.
+So the reference decoders get the pitch, the harmonic count and every voicing
+decision exactly right, and the spectral envelope slightly wrong on most frames.
+Audibly it is a small effect — the band correlation against the radio is 0.968
+against this decoder's 0.970 — which is why it survived fifteen years.
 
 ## The arithmetic is fixed point, like the radio's
 
@@ -267,13 +318,17 @@ The test corpus is six real Baofeng DM-32 transmissions — **2 052** on-air AMB
 frames under DMRA voice privacy (ARC4, AES-128 and AES-256), from
 [`known-key-mbe-samples`](https://github.com/tylerwatt12/known-key-mbe-samples),
 whose README records the DMR captures as coming from a Baofeng DM-32, the same
-radio whose firmware supplied the tables. The reference side comes from two
-independent implementations:
+radio whose firmware supplied the tables. The reference side is the radio's own
+decoder, executed:
 
-* **mbelib** — the reference decoder used by DSD, OP25 and SDRangel. Fixtures
-  are generated by `tools/mbe_ref.c`, which links it.
+* **the firmware** — `Vocoder_TxTask 0x0002EC30`, run out of the image under the
+  p-code emulator in `baofeng-dm32uv-reveng` over the same payloads. This is the
+  oracle: `test_firmware` requires exact agreement on everything but the
+  amplitudes.
+* **mbelib** — the reference decoder used by DSD, OP25 and SDRangel, via
+  `tools/mbe_ref.c`. Measured, not required to agree.
 * **JMBE / SDRTrunk** — a separate implementation again, via the capture's
-  `expected.wav`.
+  `expected.wav`. Measured.
 
 | Test | What is compared | Result |
 |---|---|---|
@@ -283,32 +338,39 @@ independent implementations:
 | `test_basop` | the firmware's log2, pow2, sqrt and cos swept across their **whole** input domains against libm, plus log2's coefficients against the Taylor series they turn out to be | 10 621 checks; cos 6.1e-5, log2 2.6e-3, pow2 1.2e-4, sqrt 1.3e-3 — the radio's accuracies, not this code's |
 | `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 123 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` **4.8e-5** / `L` **120/120** |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
-| `test_params` | per frame against mbelib: every voicing decision and the classification **exactly**; `w0`, `L`, gain and amplitudes bounded, since the decoder follows the radio where the two disagree — see *Where this decoder and mbelib disagree on purpose* | 12 402 checks; worst dev w0 **4.7e-4**, γ 2.7e-4, Ml 6.8e-3; 111 `L` divergences, all of them b0 ≥ 120; 5 pitchless frames skipped |
-| `test_synth` | 16-band log-energy spectrum and level, per frame, against mbelib's PCM | mean band correlation **0.975**, level ratio **1.000** |
-| `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.966** across six captures |
+| `test_firmware` | **the parity test.** Every frame against the firmware's own decoder, executed: classification, `L`, `f0` and every voicing decision required to be *exact*, amplitudes bounded | 78 146 checks; 2 052 frames, **all exact**; amplitudes 1.1 dB settled, 3.6 dB in the frames after a non-voice frame |
+| `test_mbelib` | how well mbelib decodes the same frames, given the radio is the definition | 10 855 checks; `w0` 3.1e-6, `L` 242/242, voicing **10 006/10 006**; amplitudes **11.8%** apart |
+| `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.970**, worst 0.790; mbelib on the same reference 0.968 |
+| `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.954** across six captures |
 | `test_encode` | decode 2 052 real frames from six captures to parameters, re-quantise, demand the radio's own bits back | **1 354/1 664** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
 | `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames; 1 783 frames where `b0` is unrecoverable because the voicing pattern selected the pitchless branch |
 | `test_encode_pcm` | analyse audio whose true pitch is known because it came from the radio's bitstream | pitch within 4 quantiser steps on **173/191**, **1** octave error, level ×0.93 |
 
-`test_params` is the load-bearing pipeline test. The AMBE spectral envelope is
+`test_firmware` is the load-bearing pipeline test. The AMBE spectral envelope is
 coded differentially against the previous frame, so one wrong bit position or
-blend coefficient diverges within a few frames and never recovers. Running 360
-consecutive frames of real speech through it and holding `w0`, `L` and every
-voicing decision exact is a far stronger statement than any single-frame vector.
+blend coefficient diverges within a few frames and never recovers. Running 2 052
+consecutive frames of real speech through it and holding the classification,
+`f0`, `L` and every one of 71 977 voicing decisions exact against the decoder
+the radio actually ships is a far stronger statement than any single-frame
+vector — and it is a statement about the radio, not about another
+reimplementation of the same specification.
 
-Since the decoder now uses the radio's Q11 tables and mbelib uses its own float
-reconstruction, the gain and amplitude chain *cannot* agree exactly. Those are
-bounded at the measured worst case instead — γ within one quantiser step
-(2.7e-4), spectral amplitudes within 0.7% — and `test_tables` is where the
-tables themselves are checked value by value.
+Two things it does not settle. The spectral amplitudes are bounded rather than
+exact, at the measured 1.1 dB, and `test_tables` is where the codebook values
+themselves are checked one by one. And the emulator's audio comes out of the
+firmware's own synthesiser, whose noise is not this one's, so `test_synth`
+compares spectra.
 
 ### Why the audio is not compared sample by sample
 
 MBE synthesis is deliberately stochastic: every harmonic above `L/4` gets a
 random phase offset and unvoiced bands are filled with randomly phased
 multi-sine noise. mbelib calls `rand()`; this decoder uses a seeded xorshift so
-its output is reproducible run to run. Two correct implementations therefore
-never produce identical waveforms, and the tests compare spectra and levels.
+its output is reproducible run to run; the radio's synthesiser is an inverse FFT
+again. No two of the three produce the same waveform, and the tests compare
+spectra and levels. The level does not match either, and that is a convention:
+the ring the emulator reads is upstream of the output gain this decoder applies,
+so `test_synth` asserts the ratio is the measured ×3.86 rather than one.
 `test_synth` also hashes this decoder's own output to catch accidental
 non-determinism.
 
@@ -336,11 +398,20 @@ statistic matters as much as the accepted one.
 
 ## Fixtures
 
-`tests/fixtures/` holds only derived vectors (frames, payload bits, reference
-parameters and reference PCM, ~470 KB). The upstream sample repository carries
-no licence, so it is fetched into `third_party/` by `make fixtures` rather than
-vendored; `test_e2e` skips its audio comparison when it is absent and still
-runs everything else.
+`tests/fixtures/` holds only derived vectors, ~990 KB. Three kinds:
+
+* `.frames` `.fec49` `.ambe49` — the on-air bytes, the FEC output and the
+  decrypted 49-bit payloads for the six captures.
+* `.fwparms` `.fwamps` `.fwpcm` — **the radio's own answers**, produced by
+  running `Vocoder_TxTask 0x0002EC30` out of the firmware image under the
+  p-code emulator in `baofeng-dm32uv-reveng` over those same payloads. This is
+  what `test_firmware` compares against, and regenerating it needs that project
+  and a Ghidra install, not this one.
+* `.parms` `.pcm` — mbelib's, for the external-decoder measurement.
+
+The upstream sample repository carries no licence, so it is fetched into
+`third_party/` by `make fixtures` rather than vendored; `test_e2e` skips its
+audio comparison when it is absent and still runs everything else.
 
 ## The encoder
 

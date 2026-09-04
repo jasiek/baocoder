@@ -90,6 +90,7 @@ int ambe_decode_bits(ambe_decoder *d, const uint8_t ambe_d[AMBE_BITS],
         if (d->cur.repeat <= 3) {
             ambe_move_parms(&d->cur, &d->prev);
             ambe_enhance_spectrum(&d->cur);
+            ambe_apply_unvoiced_gain(&d->cur);
             ambe_synthesize(pcm, &d->cur, &d->prev_enh, d->uvquality, &d->rng);
             ambe_move_parms(&d->cur, &d->prev_enh);
             return 0;

@@ -148,6 +148,35 @@ void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L_out)
 }
 
 /*
+ * The unvoiced amplitude scale, unvc = 0.2046 / sqrt(w0), applied to the
+ * unvoiced harmonics only.
+ *
+ * It is deliberately NOT folded into the amplitudes by the parameter decode,
+ * where mbelib and JMBE fold it.  The radio does not: its own decoded spectral
+ * array (Vocoder_CopyFrameParamsWithReset 0x00019CBC parks 56 int16 at
+ * params+0x10, post-enhancement) carries no w0-dependent unvoiced factor at
+ * all, and fitting one as k*w0^p over the emulated corpus gives p = -0.004,
+ * R^2 = 0.0000 - flat, so it is applied at synthesis rather than being a
+ * different constant.  Keeping it out until after ambe_enhance_spectrum also
+ * matters, because that stage renormalises to the frame's energy: measured
+ * against the firmware's array, moving the gain here takes the median
+ * per-frame residual from 1.44 dB to 1.21 dB.
+ */
+void ambe_apply_unvoiced_gain(ambe_parms *p)
+{
+    int32_t w0_q28 = (int32_t)(((int64_t)p->f0 * K_TWO_PI_Q28) >> AMBE_Q_F0);
+    short   e = 31 - 28;                   /* w0 = w0_q28 * 2^(e - 31) */
+    unsigned int m = ambe_sqrt(w0_q28, &e);
+    int64_t den = (int64_t)m << (e - 15 + 30);   /* sqrt(w0) in Q30 */
+    int32_t unvc_q30 = den ? (int32_t)(((int64_t)K_0P2046_Q30 << 30) / den) : 0;
+    int l;
+
+    for (l = 1; l <= p->L; l++)
+        if (!p->Vl[l])
+            p->Ml[l] = (int32_t)(((int64_t)p->Ml[l] * unvc_q30) >> 30);
+}
+
+/*
  * Vocoder_DecodePitchlessGainMode 0x00027EF0.  Over the frame's voicing word it
  * tests the two globals at 0x000280D0 and 0x000280D4, which the image carries as
  * 0x55555555 and 0xAAAAAAAA - against sixteen two-bit crumbs, exactly the low
@@ -195,8 +224,29 @@ static int32_t q11_to_q24(int32_t v)
 const int ambe_b0_idx[7] = {  0,  1,  2,  3, 37, 38, 39 };
 const int ambe_b1_idx[5] = {  4,  5,  6,  7, 35 };
 const int ambe_b2_idx[5] = {  8,  9, 10, 11, 36 };
-const int ambe_b3_idx[9] = { 12, 13, 14, 15, 16, 17, 18, 19, 40 };
-const int ambe_b4_idx[7] = { 20, 21, 22, 23, 41, 42, 43 };
+/*
+ * b3's and b4's low bits are NOT where mbelib, JMBE and every other open
+ * implementation put them, and this is the radio's placement, measured.
+ *
+ * The firmware's own 49-bit payload buffer is in field order - b0(7) b1(5)
+ * b2(5) b3(9) b4(7) b5(5) b6(4) b7(4) b8(3), contiguous - where this array is
+ * in mbelib's scattered order.  Pushing 49 one-hot payloads through the stock
+ * decoder under the p-code emulator maps one onto the other exactly: every
+ * probe produced a single output bit, and seven of the nine field groups
+ * reproduce the tables below unchanged.  The two that do not are these, and
+ * they differ by a rotation of the four c3 bits 40..43:
+ *
+ *     mbelib    b3 = d[12..19] d[40]      b4 = d[20..23] d[41] d[42] d[43]
+ *     the radio b3 = d[12..19] d[43]      b4 = d[20..23] d[40] d[41] d[42]
+ *
+ * Corroborated independently by the amplitudes: against the firmware's own
+ * decoded spectral array the median per-frame residual falls from 2.58 dB to
+ * 1.44 dB, and frames where the two readings coincide improve as well - which
+ * is what a predictive envelope requires, a wrong index contaminating the
+ * frames that follow it.
+ */
+const int ambe_b3_idx[9] = { 12, 13, 14, 15, 16, 17, 18, 19, 43 };
+const int ambe_b4_idx[7] = { 20, 21, 22, 23, 40, 41, 42 };
 const int ambe_b5_idx[5] = { 24, 25, 26, 27, 44 };
 const int ambe_b6_idx[4] = { 28, 29, 30, 45 };
 const int ambe_b7_idx[4] = { 31, 32, 33, 46 };
@@ -257,7 +307,7 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     int b0, b1, b2, b3, b4, b5, b6, b7, b8;
     int i, j, k, l, L, silence = 0;
     int Ji[5], intkl[AMBE_MAX_HARMONICS + 1], nextkl[AMBE_MAX_HARMONICS + 1];
-    int32_t f0, unvc_q30;
+    int32_t f0;
     int32_t Gm[9], Ri[9], Cik[5][18], Tl[AMBE_MAX_HARMONICS + 1];
     int32_t deltal[AMBE_MAX_HARMONICS + 1];
     int32_t Sum42, Sum43, BigGamma, dgamma;
@@ -324,16 +374,6 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         ambe_pitch_from_b0(b0, AMBE_B0_WIDTH, &f0, &L);
         cur->f0 = f0;
         cur->L  = L;
-    }
-
-    /* unvc = 0.2046 / sqrt(w0), the unvoiced amplitude scale */
-    {
-        int32_t w0_q28 = (int32_t)(((int64_t)f0 * K_TWO_PI_Q28) >> AMBE_Q_F0);
-        short   e = 31 - 28;               /* w0 = w0_q28 * 2^(e - 31) */
-        unsigned int m = ambe_sqrt(w0_q28, &e);
-        /* sqrt(w0) = m * 2^(e - 15); unvc = 0.2046 / that, in Q30 */
-        int64_t den = (int64_t)m << (e - 15 + 30);
-        unvc_q30 = den ? (int32_t)(((int64_t)K_0P2046_Q30 << 30) / den) : 0;
     }
 
     /* ---- b1: voicing decisions, one per 500 Hz band, mapped per harmonic */
@@ -492,8 +532,6 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
                Q24 log is taken to the Q16 that ambe_pow2 wants. */
             x = ((int64_t)cur->log2Ml[l] * K_0P693_OVER_LN2_Q30) >> 30;
             mant[l] = ambe_pow2((unsigned int)(int32_t)(x >> (AMBE_Q_LOG - 16)), &ex[l]);
-            if (!cur->Vl[l])
-                mant[l] = (int32_t)(((int64_t)mant[l] * unvc_q30) >> 30);
             if (ex[l] > maxex)
                 maxex = ex[l];
         }

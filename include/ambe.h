@@ -186,6 +186,14 @@ void ambe_move_parms(const ambe_parms *src, ambe_parms *dst);
 void ambe_enhance_spectrum(ambe_parms *cur);
 
 /*
+ * Scale the unvoiced harmonics by 0.2046/sqrt(w0), in place.  This runs after
+ * ambe_enhance_spectrum and is not part of the parameter decode: the radio's
+ * own decoded amplitudes carry no unvoiced factor, so ambe_parms.Ml is the
+ * spectral envelope as the radio has it and this is a synthesis gain.
+ */
+void ambe_apply_unvoiced_gain(ambe_parms *p);
+
+/*
  * Synthesise 160 samples from the current and previous parameter sets.
  * `rng` carries the decoder's deterministic noise generator state.
  * uvquality selects the number of sinusoids per unvoiced band (1..64).
