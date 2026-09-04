@@ -156,6 +156,15 @@ uint32_t ambe_golay24_encode(uint32_t data12);
  * frame's parameters (the spectral envelope is differentially coded) and is
  * updated in place where the algorithm requires it.
  * Returns the frame classification.
+ *
+ * `prev` is the **predictor**, and only a voice frame advances it: a caller
+ * that loops must do `ambe_move_parms(&cur, &prev)` when the return is
+ * AMBE_FRAME_VOICE and *not* otherwise.  Every b0 >= 120 frame - silence,
+ * erasure and tone alike - leaves the radio's envelope state alone, which is
+ * measured against the firmware's own decoder rather than assumed: propagating
+ * one instead costs 1.12 log2 on the frame that follows it, decaying at the
+ * codec's 0.65 over the next seven, and holding removes the transient
+ * entirely.  ambe_decode_bits does this for you.
  */
 ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
                                   ambe_parms *cur, ambe_parms *prev,

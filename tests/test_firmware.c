@@ -102,10 +102,9 @@ static int cmp_capture(const char *name, int *frames_out, int *harm_out,
             (*voice_out)++;
         }
 
-        if (type == AMBE_FRAME_VOICE || type == AMBE_FRAME_SILENCE)
+        /* only a voice frame advances the predictor - see ambe.h */
+        if (type == AMBE_FRAME_VOICE)
             ambe_move_parms(&cur, &prev);
-        else
-            ambe_init_parms(&cur, &prev, &prev_enh);
         n++;
     }
 done:
@@ -160,10 +159,8 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
         memset(&info, 0, sizeof(info));
         type = ambe_decode_parms(d, &cur, &prev, &info);
 
-        if (type == AMBE_FRAME_VOICE || type == AMBE_FRAME_SILENCE)
+        if (type == AMBE_FRAME_VOICE)
             ambe_move_parms(&cur, &prev);
-        else
-            ambe_init_parms(&cur, &prev, &prev_enh);
 
         /* what the firmware parks is the enhanced spectrum, before the
            unvoiced gain - the same point ambe_decoder.c reaches */
@@ -189,12 +186,12 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
                 acc += (dl[l] - mean) * (dl[l] - mean);
             r = sqrt(acc / m);
             /*
-             * Split, because the two are not one population.  A non-voice
-             * frame leaves the two predictors in different states - the radio
-             * does something on that path this decoder does not reproduce yet
-             * - and the difference then decays at the codec's own 0.65, from
-             * 1.12 log2 one frame after to 0.19 by the eighth.  Pooling them
-             * would hide both the steady-state figure and the open item.
+             * Split, and both bounded the same, because they used to be two
+             * populations and are not any more.  Propagating a b0 >= 120 frame
+             * into the predictor put the frame after a silence run at 1.12
+             * log2, decaying at the codec's own 0.65 over the next seven;
+             * holding it puts that frame at 0.20, which is the settled figure.
+             * Keeping the split is what makes a regression visible.
              */
             if (since >= AMBE_STEADY) {
                 if (r > *worst) *worst = r;
@@ -233,19 +230,26 @@ int main(void)
     CHECK(count > 100, "only %d settled frames' amplitudes were comparable\n", count);
     CHECK(tcount > 20, "only %d transient frames; the split is not exercised\n", tcount);
     /*
-     * The amplitudes are the one layer not at parity, and both bounds are the
-     * measured figures rather than round numbers, so that closing either gap
-     * has to come back here and tighten it.  Settled: 1.2 dB.  The residual is
-     * flat with depth below the frame's peak until the last few bits, so it is
-     * not the fixture's int16 precision - it is a real difference in the
-     * envelope chain.
+     * The amplitudes are the one layer not at parity, and the bound is the
+     * measured figure rather than a round number, so that closing the gap has
+     * to come back here and tighten it.  1.1 dB.  The residual is flat with
+     * depth below the frame's peak until the last few bits, so it is not the
+     * fixture's int16 precision - it is a real difference in the envelope
+     * chain, and it is the same on both sides of the split.
      */
     CHECK(sum / count < 0.21,
           "settled amplitude residual %.4f log2 (%.2f dB) above the measured 0.197\n",
           sum / count, 6.02 * sum / count);
     CHECK(worst < 1.0, "worst settled amplitude residual %.4f log2 too large\n", worst);
-    CHECK(tsum / tcount < 0.70,
-          "post-silence transient %.4f log2 (%.2f dB) above the measured 0.65\n",
+    /*
+     * The transient is gone, and this is where that is asserted: holding the
+     * predictor across a b0 >= 120 frame brought the frames right after one
+     * from 0.65 log2 to the settled figure, so the two populations now get the
+     * same bound.  Loosening this one is the regression to catch.
+     */
+    CHECK(tsum / tcount < 0.21,
+          "the frames after a non-voice frame are at %.4f log2 (%.2f dB), "
+          "above the settled bound - the predictor hold has regressed\n",
           tsum / tcount, 6.02 * tsum / tcount);
 
     printf("[%d frames, %d voice: L, f0, class and all %d voicing decisions "

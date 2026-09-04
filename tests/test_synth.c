@@ -25,7 +25,7 @@
 #include "testutil.h"
 
 /* measured: this decoder's output over the firmware ring's, energy weighted */
-#define LEVEL_RATIO 3.86
+#define LEVEL_RATIO 3.53
 
 int main(void)
 {
@@ -100,7 +100,7 @@ int main(void)
 
     CHECK(n == 360, "expected 360 frames, decoded %d\n", n);
     CHECK(ncorr > 150, "only %d frames were loud enough to compare\n", ncorr);
-    CHECK(sum_corr / ncorr > 0.93,
+    CHECK(sum_corr / ncorr > 0.96,
           "mean band-energy correlation against the firmware %.3f too low\n",
           sum_corr / ncorr);
     {

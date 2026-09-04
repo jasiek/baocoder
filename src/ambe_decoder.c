@@ -88,7 +88,16 @@ int ambe_decode_bits(ambe_decoder *d, const uint8_t ambe_d[AMBE_BITS],
 
     if (type == AMBE_FRAME_VOICE || type == AMBE_FRAME_SILENCE) {
         if (d->cur.repeat <= 3) {
-            ambe_move_parms(&d->cur, &d->prev);
+            /*
+             * d->prev is the spectral envelope predictor and d->prev_enh is
+             * the synthesis history; only the second advances on a frame the
+             * radio classes non-voice.  See ambe_decode_parms' header: a
+             * b0 >= 120 frame does not update the predictor, which is measured
+             * against the firmware and is worth 1.12 -> 0.20 log2 on the frame
+             * that follows a silence run.
+             */
+            if (type == AMBE_FRAME_VOICE)
+                ambe_move_parms(&d->cur, &d->prev);
             ambe_enhance_spectrum(&d->cur);
             ambe_apply_unvoiced_gain(&d->cur);
             ambe_synthesize(pcm, &d->cur, &d->prev_enh, d->uvquality, &d->rng);
