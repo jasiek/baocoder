@@ -23,6 +23,18 @@ extern "C" {
 #define AMBE_DMR_BYTES     9
 #define AMBE_MAX_HARMONICS 56    /* L is bounded by 56 in the 2450 mode      */
 
+/*
+ * The two constants the radio writes when a frame has no usable pitch.
+ * AMBE_F0_PITCHLESS is Vocoder_PitchFromLog2 0x0002AD6C's own low clamp, which
+ * Vocoder_DecodeAmbeFrame 0x0002033C also writes directly, with L = 56, on the
+ * pitchless path.  AMBE_F0_NOPITCH / AMBE_L_NOPITCH are the fixed pair
+ * Vocoder_DecodePitchIndex 0x00022B78's non-voiced path writes for every
+ * b0 >= 120 - silence, erasure and tone alike.
+ */
+#define AMBE_F0_PITCHLESS  0x1079
+#define AMBE_F0_NOPITCH    0x4027
+#define AMBE_L_NOPITCH     15
+
 /* Frame classification returned by the parameter decoder. */
 typedef enum {
     AMBE_FRAME_VOICE   = 0,
@@ -156,6 +168,14 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
  * sample, the scale Vocoder_PitchFromLog2 0x0002AD6C emits.
  */
 void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L);
+
+/*
+ * True when the frame takes the radio's pitchless parameterisation - no band
+ * voiced and at least one voicing crumb in the high-bit state - in which case
+ * f0 and L are AMBE_F0_PITCHLESS / AMBE_MAX_HARMONICS and b0 is not read.
+ * Vocoder_DecodePitchlessGainMode 0x00027EF0.
+ */
+int ambe_pitchless_gain_mode(int b1);
 
 void ambe_init_parms(ambe_parms *cur, ambe_parms *prev, ambe_parms *prev_enh);
 void ambe_move_parms(const ambe_parms *src, ambe_parms *dst);

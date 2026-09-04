@@ -123,7 +123,7 @@ int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
                       uint8_t ambe_d[AMBE_BITS], ambe_frame_info *info)
 {
     int b[9];
-    int i, j, k, l, L, b0;
+    int i, j, k, l, L, b0, pitchless;
     int Ji[5], intkl[AMBE_MAX_HARMONICS + 1], nextkl;
     int32_t f0;
     int32_t P[AMBE_MAX_HARMONICS + 1], D[AMBE_MAX_HARMONICS + 1];
@@ -136,17 +136,40 @@ int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
     memset(b, 0, sizeof(b));
     memset(Cik, 0, sizeof(Cik));
 
-    /* ---- b0: pitch, and the harmonic count it forces */
+    /*
+     * ---- b0: pitch, and the harmonic count it forces.
+     *
+     * Except on the pitchless path.  When the voicing pattern selects it the
+     * decoder writes f0 = AMBE_F0_PITCHLESS / L = 56 without reading b0 at all
+     * (Vocoder_DecodeAmbeFrame 0x0002033C), so b0 carries no information there
+     * and cannot be recovered - the pitch law reaches 4260 at b0 = 119 and
+     * never 4217, which is what makes the signature unambiguous in this
+     * direction.  What must be reproduced is the branch, and that is b1's job.
+     */
+    pitchless = (cur->f0 == AMBE_F0_PITCHLESS && cur->L == AMBE_MAX_HARMONICS);
     b0 = quantise_b0(cur->f0);
-    ambe_pitch_from_b0(b0, 7, &f0, &L);
+    if (pitchless) {
+        f0 = AMBE_F0_PITCHLESS;
+        L  = AMBE_MAX_HARMONICS;
+    } else {
+        ambe_pitch_from_b0(b0, 7, &f0, &L);
+    }
     b[0] = b0;
 
     /* ---- b1: the voicing pattern whose bands match best */
     {
-        int best = 0, bestscore = -1;
+        int best = -1, bestscore = -1;
         for (i = 0; i < 32; i++) {
             unsigned int vuv = ambe_vuv_packed[(i << 2) & 127];
             int score = 0;
+            /*
+             * A row that selects the pitchless mode and one that does not are
+             * not interchangeable even when their eight voiced flags agree:
+             * the decoder branches on the difference.  Search only the side
+             * this frame is on.
+             */
+            if (ambe_pitchless_gain_mode(i) != pitchless)
+                continue;
             for (l = 1; l <= L && l <= cur->L; l++) {
                 int jl = (int)(((int64_t)l * 16 * f0) >> AMBE_Q_F0);
                 int v;
@@ -156,7 +179,7 @@ int ambe_encode_parms(const ambe_parms *cur, ambe_parms *prev,
             }
             if (score > bestscore) { bestscore = score; best = i; }
         }
-        b[1] = best;
+        b[1] = best < 0 ? 0 : best;
     }
 
     /* ---- the envelope inverse */

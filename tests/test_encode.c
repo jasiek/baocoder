@@ -63,6 +63,7 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out,
     ambe_parms cur, prev, prev_enh;
     int n = 0, voice = 0, silence = 0, other = 0;
     int exact_bits = 0, b1_ambiguous = 0, hoc_unused = 0, hoc_tied = 0;
+    int b0_pitchless = 0;
     int i;
 
     ambe_init_parms(&cur, &prev, &prev_enh);
@@ -107,7 +108,17 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out,
             for (i = 0; i < 9; i++) {
                 if (einfo.b[i] == dinfo.b[i])
                     continue;
-                if (i == 1) {
+                if (i == 0 && cur.f0 == AMBE_F0_PITCHLESS &&
+                    cur.L == AMBE_MAX_HARMONICS) {
+                    /*
+                     * The pitchless path writes f0 and L directly and never
+                     * reads b0 (Vocoder_DecodeAmbeFrame 0x0002033C), so no
+                     * information about it survives into the parameters.  What
+                     * has to round-trip is the branch, and check (1) above -
+                     * which passed to get here - is where that is asserted.
+                     */
+                    b0_pitchless++;
+                } else if (i == 1) {
                     int pa[8], pb[8];
                     vuv_pattern(dinfo.b[1], pa);
                     vuv_pattern(einfo.b[1], pb);
@@ -172,9 +183,10 @@ static int run(const char *name, int expect, int *voice_out, int *exact_out,
 
     CHECK(n == expect, "%s: expected %d frames, read %d\n", name, expect, n);
     CHECK(voice > 100, "%s: only %d voice frames\n", name, voice);
-    CHECK(exact_bits + b1_ambiguous + hoc_unused + hoc_tied >= voice,
+    CHECK(exact_bits + b1_ambiguous + hoc_unused + hoc_tied + b0_pitchless >= voice,
           "%s: %d frames differed for no accepted reason\n",
-          name, voice - exact_bits - b1_ambiguous - hoc_unused - hoc_tied);
+          name, voice - exact_bits - b1_ambiguous - hoc_unused - hoc_tied
+                - b0_pitchless);
     *voice_out += voice;
     *exact_out += exact_bits;
     *silence_out += silence;

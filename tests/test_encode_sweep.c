@@ -71,6 +71,7 @@ int main(void)
     unsigned char seen5[32], seen6[16], seen7[16], seen8[8], seenL[57];
     int trial, i, cov, tot;
     long compared = 0, ambiguous_b1 = 0, unused_hoc = 0, tied_hoc = 0;
+    long pitchless_b0 = 0;
 
     hoc[1] = ambe_hoc_b5_q11; hoc_n[1] = 32;
     hoc[2] = ambe_hoc_b6_q11; hoc_n[2] = 16;
@@ -163,6 +164,17 @@ int main(void)
                 continue;
             }
             if (einfo.b[i] == b[i]) { compared++; continue; }
+            if (i == 0 && cur.f0 == AMBE_F0_PITCHLESS &&
+                cur.L == AMBE_MAX_HARMONICS) {
+                /*
+                 * b1 selected the pitchless parameterisation, on which
+                 * Vocoder_DecodeAmbeFrame 0x0002033C writes f0 and L directly
+                 * and never reads b0 - so b0 is not recoverable, exactly as an
+                 * unused higher-order coefficient is not.
+                 */
+                pitchless_b0++;
+                continue;
+            }
             if (i == 1) {
                 /*
                  * Accepted only when the two indices agree on every band some
@@ -212,8 +224,9 @@ int main(void)
     CHECK(tot >= 40, "only %d of 48 harmonic counts reached\n", tot);
 
     printf("[4096 frames: every entry of all 9 codebooks swept, %d/48 L values; "
-           "%ld indices exact, %ld ambiguous b1, %ld unused HOC, %ld tied HOC] ",
-           tot, compared, ambiguous_b1, unused_hoc, tied_hoc);
+           "%ld indices exact, %ld ambiguous b1, %ld unused HOC, %ld tied HOC, "
+           "%ld pitchless b0] ",
+           tot, compared, ambiguous_b1, unused_hoc, tied_hoc, pitchless_b0);
 
     return t_done("encoder: exhaustive codebook sweep");
 }

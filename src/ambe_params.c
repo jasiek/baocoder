@@ -147,6 +147,24 @@ void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L_out)
     *L_out  = harmonic_count(f0);
 }
 
+/*
+ * Vocoder_DecodePitchlessGainMode 0x00027EF0.  Over the frame's voicing word it
+ * tests the two globals at 0x000280D0 and 0x000280D4, which the image carries as
+ * 0x55555555 and 0xAAAAAAAA - against sixteen two-bit crumbs, exactly the low
+ * bit of every crumb and the high bit of every crumb:
+ *
+ *     no band voiced   (word & 0x55555555) == 0
+ *     and some crumb in the high-bit state   (word & 0xAAAAAAAA) != 0
+ *
+ * The crumb's low bit is the band's voiced flag, so the second bit is not
+ * decorative: 01 is voiced, 10 selects this pitchless parameterisation.
+ */
+int ambe_pitchless_gain_mode(int b1)
+{
+    unsigned int w = ambe_vuv_packed[(b1 << 2) & 127];
+    return (w & 0x55555555u) == 0 && (w & 0xAAAAAAAAu) != 0;
+}
+
 int32_t ambe_w0_q24(const ambe_parms *p)
 {
     /* 2*pi*f0: Q19 x Q28 -> Q24 */
@@ -253,6 +271,17 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         info->b[0] = b0;
     }
 
+    /*
+     * b0 >= 120 has no pitch-law value at all: Vocoder_DecodePitchIndex
+     * 0x00022B78 writes the fixed 0x4027 / 15 for every one of those indices
+     * and does not distinguish silence from erasure from tone, so the
+     * parameter block carries that pair here too.  The classification below is
+     * this library's, and drives the mute in ambe_decoder.c.
+     */
+    if (b0 >= 120) {
+        cur->f0 = AMBE_F0_NOPITCH;
+        cur->L  = AMBE_L_NOPITCH;
+    }
     if (b0 >= 120 && b0 <= 123) {
         if (info) info->type = AMBE_FRAME_ERASURE;
         return AMBE_FRAME_ERASURE;
@@ -261,14 +290,36 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
         if (info) info->type = AMBE_FRAME_TONE;
         return AMBE_FRAME_TONE;
     }
+    b1 = bits_to_int(ambe_d, B1_IDX, 5);
+
     if (b0 == 124 || b0 == 125) {
         silence = 1;
-        f0      = 1 << (AMBE_Q_F0 - 5);    /* 1/32 turn per sample, exactly */
-        L       = 14;
+        /*
+         * Vocoder_DecodePitchIndex 0x00022B78's non-voiced path writes the
+         * fixed pair *pOutGain = 0x4027, *pOutGainExp = 0xF - f0 = 16423 in
+         * Q19 and L = 15 - for every b0 >= 120, which running that function
+         * over all 128 indices confirms.  mbelib and JMBE use PI/32 (16384)
+         * with L = 15 for b0 = 124 and 14 for b0 = 125; the radio makes no
+         * such distinction.
+         */
+        f0      = AMBE_F0_NOPITCH;
+        L       = AMBE_L_NOPITCH;
         cur->f0 = f0;
-        cur->L  = 14;
+        cur->L  = L;
         for (l = 1; l <= L; l++)
             cur->Vl[l] = 0;
+    } else if (ambe_pitchless_gain_mode(b1)) {
+        /*
+         * Vocoder_DecodeAmbeFrame 0x0002033C does not always call the pitch
+         * decoder.  When Vocoder_DecodePitchlessGainMode 0x00027EF0 returns 1
+         * it writes pFrameParams[6] = 0x1079 and pFrameParams[2] = 0x38
+         * directly and b0 is never read: the minimum fundamental and the
+         * maximum harmonic count, the frame having no usable pitch.
+         */
+        f0      = AMBE_F0_PITCHLESS;
+        L       = AMBE_MAX_HARMONICS;
+        cur->f0 = f0;
+        cur->L  = L;
     } else {
         ambe_pitch_from_b0(b0, AMBE_B0_WIDTH, &f0, &L);
         cur->f0 = f0;
@@ -286,7 +337,6 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
     }
 
     /* ---- b1: voicing decisions, one per 500 Hz band, mapped per harmonic */
-    b1 = bits_to_int(ambe_d, B1_IDX, 5);
     if (!silence) {
         /*
          * Vocoder_DecodeSpectralCodebookEntry 0x00022DB4 left-justifies the b1
