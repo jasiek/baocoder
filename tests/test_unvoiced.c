@@ -5,10 +5,11 @@
  * the function CALLED, one case per record, with its five arguments poked in
  * and its results read out - tools/fw_oracle/gen_uv_jobs.py.  The inputs are
  * still the radio's own, taken from a Vocoder_TxTask run over a real capture,
- * but pairing them with the outputs is now arithmetic rather than alignment,
- * which matters: the earlier sequence capture of this function attached a
- * parameter block to the wrong call often enough to make a whole afternoon's
- * conclusions wrong.
+ * but pairing them with the outputs is now arithmetic rather than alignment.
+ * That also settles a suspicion the sequence capture could not: replaying its
+ * inputs reproduces its outputs 103 times out of 103, so it had paired state
+ * with parameter block correctly all along, and shifting the block by six
+ * records drops that to 0 of 97.
  *
  * Five things are checked, in the order a failure is easiest to localise:
  *
@@ -16,7 +17,7 @@
  *   its own across the whole run - which is what a stream decoder does, and
  *   what fails if the generator drifts by a single step;
  *
- *   the windowed 2n-sample segment the transform is given;
+ *   the windowed 2n-sample segment the forward transform is given;
  *
  *   the per-harmonic voicing flags, against the ones
  *   Vocoder_BuildFrameResetPattern 0x00022CD0 built from the same block;
@@ -44,7 +45,8 @@
 #define C_BLK   1
 #define C_ST0   (C_BLK + BLK)
 #define C_VOIC  (C_ST0 + STLEN)
-#define C_SPEC  (C_VOIC + NVOIC)
+#define C_WND   (C_VOIC + NVOIC)
+#define C_SPEC  (C_WND + NSPEC)
 #define C_ACC   (C_SPEC + NSPEC)
 #define C_ST1   (C_ACC + NS)
 #define NCOL    (C_ST1 + STLEN)
@@ -74,7 +76,7 @@ int main(void)
     size_t cap = 0;
     ambe_unvoiced_state carried;
     int n = 0, given_ok = 0, carried_ok = 0, primed = 0;
-    int voic_ok = 0, spec_ok = 0, acc_ok = 0, st_ok = 0;
+    int voic_ok = 0, wnd_ok = 0, spec_ok = 0, acc_ok = 0, st_ok = 0;
 
     ambe_unvoiced_reset(&carried);
 
@@ -138,7 +140,7 @@ int main(void)
         if (!bad)
             voic_ok++;
 
-        /* 4. the shaped spectrum the inverse transform is handed */
+        /* 4. the windowed segment, and the shaped spectrum it becomes */
         if (cls != 3) {
             ambe_unvoiced_state u = st;
             int32_t fft[128];
@@ -146,6 +148,15 @@ int main(void)
             short fexp;
 
             ambe_unvoiced_window(spec, &u, NS, 8);
+            for (bad = 0, k = 0; k < NSPEC; k++)
+                if (spec[k] != (int16_t)rec[C_WND + k]) {
+                    CHECK(0, "call %d windowed[%d]: %d, firmware %d\n",
+                          n, k, (int)spec[k], rec[C_WND + k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                wnd_ok++;
             fexp = ambe_fft_forward(fft, 0, 8, 0);
             ambe_unvoiced_shape(fft, NS, cls, L, f0, amps, amp_exp, voiced,
                                 pitch, fexp);
@@ -159,6 +170,7 @@ int main(void)
             if (!bad)
                 spec_ok++;
         } else {
+            wnd_ok++;
             spec_ok++;
         }
 
@@ -199,44 +211,14 @@ int main(void)
     CHECK(carried_ok == n, "generator exact carrying our own state on %d of %d\n",
           carried_ok, n);
     CHECK(voic_ok == n,   "voicing flags exact on %d of %d\n", voic_ok, n);
+    CHECK(wnd_ok == n,    "windowed segment exact on %d of %d\n", wnd_ok, n);
     CHECK(spec_ok == n,   "shaped spectrum exact on %d of %d\n", spec_ok, n);
     CHECK(acc_ok == n,    "samples exact on %d of %d\n", acc_ok, n);
     CHECK(st_ok == n,     "state after exact on %d of %d\n", st_ok, n);
 
-    /* ---- and the windowed segment, against its own capture -------------- */
-    {
-        FILE *g = fixture_open("dm32_arc4_1.fwuvbuf");
-        int m = 0, buf_ok = 0;
-
-        while (getline(&line, &cap, g) > 0) {
-            ambe_unvoiced_state u;
-            int16_t want[256], got[256];
-            char *p = line;
-            int k, bad;
-
-            if (line[0] == '#')
-                continue;
-            for (k = 0; k < STLEN; k++) u.s[k] = (int16_t)strtol(p, &p, 10);
-            for (k = 0; k < 256; k++) want[k] = (int16_t)strtol(p, &p, 10);
-            ambe_unvoiced_window(got, &u, NS, 8);
-            for (bad = 0, k = 0; k < 256; k++)
-                if (got[k] != want[k]) {
-                    CHECK(0, "buffer %d sample %d: %d, firmware %d\n", m, k,
-                          (int)got[k], (int)want[k]);
-                    bad = 1;
-                    break;
-                }
-            if (!bad)
-                buf_ok++;
-            m++;
-        }
-        fclose(g);
-        CHECK(m > 80, "only %d buffers in the fixture\n", m);
-        CHECK(buf_ok == m, "windowed buffer exact on %d of %d\n", buf_ok, m);
-        printf("[%d firmware calls: %d generated values, %d windowed buffers, "
-               "%d voicing flags, %d spectra of 256 and %d samples, all "
-               "bit-exact] ", n, n * NS, m, n * NVOIC, n, n * NS);
-    }
+    printf("[%d firmware calls: %d generated values, %d voicing flags, %d "
+           "windowed segments and %d shaped spectra of 256, and %d samples: "
+           "all bit-exact] ", n, n * NS, n * NVOIC, n, n, n * NS);
     free(line);
     return t_done("Vocoder_SynthesizeUnvoiced against the firmware, bit for bit");
 }

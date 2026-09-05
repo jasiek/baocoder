@@ -35,21 +35,41 @@ python3 tools/fw_oracle/export.py /tmp tests/fixtures
 `csky-mvcv.patch`, in the reverse-engineering project's `docs/patches/`
 alongside the other C-SKY sleigh fixes, corrects the 16-bit `mvcv`
 constructor, which produced 0xFE/0xFF instead of 0/1 and so made every branch
-on a condition the compiler had moved into a register go the same way. It is not optional: without
-it `Vocoder_SynthesizeUnvoiced` takes the wrong one of its two gain paths on
-every frame.
+on a condition the compiler had moved into a register go the same way. It is
+not optional: without it `Vocoder_SynthesizeUnvoiced` takes the wrong one of
+its two gain paths on every frame.
 
-Regenerating `tests/fixtures/dm32_arc4_1.frames` with and without it says which
-fixtures the defect touched. `.fwparms`, `.fwenv` and `.fwamps` come out
-**identical** - the parameter path never used it. `.fwpcm` does not: 31.4% of
-57 600 samples differ, worst 57 LSB against a 1 984 peak, 35.0 dB SNR.
+Regenerating `dm32_arc4_1` with and without it says which fixtures the defect
+touched, and the answer is a clean split down the middle of the vocoder:
 
-`*.fwunvoiced` is regenerated. **`*.fwpcm` and everything derived from it -
-`*.fwencbits`, `*.fwanalysis`, `*.fwsynth`, `*.fwpostfilter`, `*.fwifft` - still
-predate the fix.** Those drive tolerance tests rather than bit-exactness
-assertions, so they are stale rather than wrong-and-failing, but the
-regeneration is outstanding work and the encoder fixtures have to be re-run
-*after* the PCM they take as input, not alongside it.
+| fixture | before vs after the patch |
+|---|---|
+| `.fwparms`, `.fwenv`, `.fwamps` | **byte-identical** - the parameter path never used `mvcv` |
+| `.fwpcm` | 31.4% of 57 600 samples differ, worst 57 LSB against a 1 984 peak, **35.0 dB SNR** |
+| `.fwanalysis` | 97 of 360 frames differ |
+| `.fwaenv` | 352 of 360 |
+| `.fwencbits` | 342 of 360 |
+
+Everything in that table has been regenerated, in that order, because the order
+is load-bearing: the encoder oracle takes `.fwpcm` as its *input*, so re-running
+it alongside the decoder rather than after it would pair new bits with old
+audio. `.fwsynth`, `.fwpostfilter` and `.fwunvoiced` were re-captured with it.
+
+What moved as a result, all of it still inside the thresholds the tests assert:
+`test_synth`'s worst-case band correlation 0.805 -> **0.831** and mbelib's on the
+same reference 0.968 -> **0.969** (the means did not move); `test_firmware_encode`
+octave errors 4% -> **2%**, envelope 2.74 -> **2.70 dB**, `L` exact 60% -> **59%**,
+pitch within 6% 85% -> **83%**. The corrected reference is very slightly easier
+to match, which is the direction a more-correct reference should move in.
+
+**`.fwfft` and `.fwifft` are the exception and are deliberately not
+regenerated.** They are input/output pairs for `Dsp_FftForward` and
+`Dsp_FftInverse`, and `test_fft_firmware` asks nothing of them but that the
+transform reproduce the pair - which it does, bit for bit, patched or not. Their
+inputs are real buffers from a real run; they are simply not index-aligned with
+anything else in the corpus, so do not try to read `.fwifft` record *i* as the
+spectrum `.fwunvoiced` record *i* hands the inverse transform. It is not, and an
+afternoon went into learning that.
 
 ## Calling one function instead of watching it
 
@@ -58,10 +78,12 @@ regeneration is outstanding work and the encoder fixtures have to be re-run
 record, instead of catching it inside a running task. That is only possible
 once the *inputs* are known - they are channel state, and `gen_synth_jobs.py`'s
 sequence capture is what learns them - but once they are, it is better in three
-ways: a record cannot pair one call's state with another call's parameter
-block, 103 calls take 27 seconds rather than ten minutes, and the inputs can be
-varied, which is the only way to reach the frame-class-2 gain path this corpus
-never contains.
+ways: 103 calls take 27 seconds rather than ten minutes, the inputs can be
+varied - the only way to reach the frame-class-2 gain path this corpus never
+contains - and it audits the capture it was built from. Feeding record *i*'s
+inputs back in reproduces record *i*'s outputs exactly, 103 of 103, which is
+what establishes that `gen_synth_jobs.py` paired state with parameter block
+correctly; taking the block from record *i-6* instead reproduces 0 of 97.
 
 ```sh
 python3 tools/fw_oracle/gen_uv_jobs.py /tmp/uv.job

@@ -18,7 +18,7 @@ same frames; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 1 187 977 checks against the radio's own decoder, plus the integer-only check
+make test     # 1 188 011 checks against the radio's own decoder, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -299,12 +299,12 @@ when the return is `AMBE_FRAME_VOICE`, and the header says so.
 |---|---|
 | mbelib, on the 242 frames of `dm32_arc4_1` whose model it shares | `w0` to 3.1e-6, gamma 2.6e-4, `L` 242/242, voicing **10 006 / 10 006** exact |
 | mbelib, gain and spectral amplitudes | **4.3%** and **12.9%** apart — the `b3`/`b4` assignment and the predictor rule |
-| mbelib, synthesised audio vs the radio's | 0.968 mean band correlation (this decoder: 0.970) |
+| mbelib, synthesised audio vs the radio's | 0.969 mean band correlation (this decoder: 0.973) |
 | JMBE / SDRTrunk, `expected.wav` vs this decoder | 0.952 mean band correlation over six captures |
 
 So the reference decoders get the pitch, the harmonic count and every voicing
 decision exactly right, and the spectral envelope slightly wrong on most frames.
-Audibly it is a small effect — the band correlation against the radio is 0.968
+Audibly it is a small effect — the band correlation against the radio is 0.969
 against this decoder's 0.973 — which is why it survived fifteen years.
 
 ## The arithmetic is fixed point, like the radio's
@@ -367,7 +367,7 @@ decoder, executed:
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
 | `test_firmware` | **the parity test.** Every frame against the firmware's own decoder, executed: classification, `L`, `f0` and every voicing decision required to be *exact*, the spectral envelope bounded | 78 145 checks; 2 052 frames, **all exact**; envelope **0.021 dB** mean, 0.279 dB worst |
 | `test_mbelib` | how well mbelib decodes the same frames, given the radio is the definition | 10 614 checks; `w0` 3.1e-6, `L` 242/242, voicing **10 006/10 006** exact; predictor state **4.3%** on gain and **12.9%** on amplitudes apart |
-| `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.973**, worst 0.805; mbelib on the same reference 0.968 |
+| `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.973**, worst 0.831; mbelib on the same reference 0.969 |
 | `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.952** across six captures |
 | `test_encode` | decode 2 052 real frames from six captures to parameters, re-quantise, demand the radio's own bits back | **1 354/1 664** voice frames bit-identical; the rest differ only where the index is unrecoverable, and all re-decode to identical parameters |
 | `test_encode_sweep` | synthesised frames stepping every codebook by coprime strides | **every entry of all nine codebooks**, 48/48 harmonic counts, 4 096 frames; 1 783 frames where `b0` is unrecoverable because the voicing pattern selected the pitchless branch |

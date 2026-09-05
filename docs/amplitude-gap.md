@@ -199,7 +199,9 @@ synthesises through an inverse FFT with `Vocoder_ApplySynthesisWindow
 
 The cheap substitute was tried and **measured worse**: starting each frame from
 the blend instead of from the previous frame drops the band correlation from
-**0.973 to 0.962**, worst-case 0.805 to 0.638. That is a result about the
+**0.973 to 0.962**, worst-case 0.805 to 0.638.  (Both baselines predate
+`csky-mvcv.patch`, which moved the worst case to 0.831; the ablation has not
+been re-run, and it is the *drop* that the argument rests on.) That is a result about the
 substitution, not about the radio's model — the parameter sequence is
 `[…, prev, mid, cur, mid', cur', …]` at 80-sample intervals, and feeding two of
 those into a 160-sample-hop overlap-add stretches them over twice their

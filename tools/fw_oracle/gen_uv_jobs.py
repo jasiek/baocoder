@@ -7,15 +7,18 @@ set up from cold.  This is the other half.  Once those inputs are known they
 can be poked back in and the function invoked directly, which is worth doing
 for three reasons:
 
-  it is a unit oracle - one call, one result, no sequence to keep aligned, so
-  a fixture record cannot silently pair one call's state with another's block;
-
   it is fast - 103 calls in 27 seconds against ten minutes for the task run,
   because there is no RTOS, no FEC and no ConfigureFrame around it;
 
   the inputs can be *changed*.  The frame class selects between two quite
   different gain paths and this corpus only ever contains class 1, so the
-  class-2 path is reachable here and nowhere else.
+  class-2 path is reachable here and nowhere else;
+
+  and it audits the capture it was built from.  Feeding record i's pitch,
+  block and state back in reproduces record i's samples and state exactly,
+  103 of 103 - which is what says the sequence capture paired them correctly.
+  Taking the block from record i-6 instead reproduces 0 of 97, so that check
+  has power rather than being a tautology.
 
 The function reads nothing but its five arguments and the SRAM constant pool,
 so a direct call is faithful: pChannelState is not consulted, and the voicing
@@ -143,19 +146,21 @@ def export(outfile, src, dest):
                  "# per record: pitch, %d shorts of parameter block, %d shorts of state\n"
                  "#   before, the %d per-harmonic voicing flags\n"
                  "#   Vocoder_BuildFrameResetPattern 0x00022CD0 built from that block,\n"
-                 "#   %d shorts of the shaped spectrum handed to Dsp_FftInverse, the %d\n"
+                 "#   the %d-short windowed noise segment handed to Dsp_FftForward and\n"
+                 "#   the %d shorts of shaped spectrum handed to Dsp_FftInverse, the %d\n"
                  "#   int32 samples added to the accumulator, then %d shorts of state after\n"
-                 % (NBLK, NST, NVOIC, 256, NS, NST))
+                 % (NBLK, NST, NVOIC, 256, 256, NS, NST))
         for i, r in enumerate(rows):
             head = r[:1 + NBLK + NST]
             voi = struct.unpack("<%dH" % NVOIC, res["peek"]["voi%d" % i][0])
+            wnd = struct.unpack("<256h", res["peek"]["wnd%d" % i][0])
             shp = struct.unpack("<256h", res["peek"]["shp%d" % i][0])
             acc = struct.unpack("<%di" % NS, res["peek"]["acc%d" % i][0])
             st1 = struct.unpack("<%dh" % NST, res["peek"]["st%d" % i][0])
-            fh.write("%s %s %s %s %s\n" % (
+            fh.write("%s %s %s %s %s %s\n" % (
                 " ".join(map(str, head)), " ".join(map(str, voi)),
-                " ".join(map(str, shp)), " ".join(map(str, acc)),
-                " ".join(map(str, st1))))
+                " ".join(map(str, wnd)), " ".join(map(str, shp)),
+                " ".join(map(str, acc)), " ".join(map(str, st1))))
             n += 1
     print("%s: %d calls" % (dest, n))
     return n

@@ -57,21 +57,26 @@ looks far worse than it is:
 | alignment | L exact | pitch ±6% | octave | envelope |
 |---|---|---|---|---|
 | lag 0 | 31% | 74% | 7% | 5.82 dB |
-| **240 samples** | **60%** | **85%** | **4%** | **2.75 dB** |
+| **240 samples** | **59%** | **83%** | **2%** | **2.70 dB** |
 
 ## Stage A — the analyser
 
 `src/ambe_analysis.c` is the one stage that is not a transcription: its FFT
 front end is the radio's, its pitch and voicing decisions are not.  Over the
-239 voice frames, at the alignment above:
+246 voice frames, at the alignment above:
 
 | | |
 |---|---|
-| harmonic count `L` exact | 60% |
-| pitch within ±6% | 85% |
-| octave errors | 4% |
-| envelope shape, mean removed | 2.75 dB |
-| voicing agreement | 43% |
+| harmonic count `L` exact | 59% |
+| pitch within ±6% | 83% |
+| octave errors | 2% |
+| envelope shape, mean removed | 2.70 dB |
+| voicing agreement | 42% |
+
+Those five and the 240-sample row above were re-measured after
+`csky-mvcv.patch` (tools/fw_oracle/README.md), which changed the reference
+audio this analyser is scored against by 35 dB SNR; the lag-0 row and the `b2`
+offset below were not, so read them for their shape rather than their digits.
 
 **Voicing is the gap, and it is a bias rather than noise.** The radio calls
 65% of harmonics voiced; this analyser calls 15%.  Agreement is *below* the
