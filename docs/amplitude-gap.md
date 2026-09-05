@@ -62,25 +62,48 @@ which is an independent confirmation of the field-ordered buffer layout.
 
 ## What is left
 
-**`Vocoder_ResampleSpectralEnvelope 0x00026A84` is not implemented here.** It
-picks a pitch — the current frame's `f0`, the previous frame's, or
-`sqrt(2*f0_cur*f0_prev)`, chosen on the two frames' voicing words against the
-masks at `0x00026C64`/`0x00026C68` — takes `Vocoder_HarmonicCountFromPitch` of
-it, resamples both frames' envelopes onto that grid with
-`Vocoder_ComputeHarmonicResampleRatio 0x000269B0`, and averages them, clamping to
-`[0x8801, 0x77ff]` and padding to 56.
+**`Vocoder_ResampleSpectralEnvelope 0x00026A84` is not implemented here**, and
+it is the only thing that stands between this decoder and the block the radio
+synthesises from. It is now read in full, along with both of its helpers:
 
-Its `L` and `f0` match this decoder's on all 2052 corpus frames, so the pitch
-selection resolves to the current frame's there. Its envelope does not: the
-straightforward reading — average the current envelope with the previous one
-resampled by the `f0` ratio — scores 3.66 dB, worse than not interpolating at
-all (3.15 dB), so `Vocoder_ComputeHarmonicResampleRatio` does something other
-than the obvious and is the next function to read.
+* **`Vocoder_ComputeHarmonicResampleRatio 0x000269B0`** builds a 60-entry window
+  from a 56-entry envelope — `buf[0] = src[0]`, `buf[k] = src[k-1]` for
+  `k = 1..56`, three edge-holds above — so index `k` *is* harmonic `k` and
+  harmonic 0 holds harmonic 1. It takes `Math_DivideNormalized 0x0002692C` of
+  the two pitches (Q16, short-circuiting to `0x10000` when they are equal), then
+  accumulates that ratio once per output harmonic and linearly interpolates:
+  **`out[l] = src at harmonic position l * f0_out / f0_src`**. That is
+  frequency-matched resampling, and it is a different law from the envelope
+  predictor's `prevL/curL` index ratio in `src/ambe_params.c`.
+* **`FUN_00022024 0x00022024`** is a pure copy — class, `L`, `f0`, the voicing
+  word and the `L`-entry envelope from the frame's params into the prediction
+  state, padded to 56 with the last value. That is why the fourth block holds
+  the current frame's envelope by the time the emulator peeks it.
 
-Whether this decoder *should* implement it is a separate question: the radio
-synthesises two 10 ms halves and this is how it builds the envelope for one of
-them, where `ambe_synth.c` interpolates in the overlap-add instead. The audio
-comparison is unaffected — 0.973 band correlation against the radio's own PCM,
-against mbelib's 0.968 on the same reference.
+So the algorithm reads as: pick a pitch (the current `f0`, the previous, or
+`sqrt(2*f0cur*f0prev)`, on the two voicing words against the masks at
+`0x00026C64`/`0x00026C68`), take `Vocoder_HarmonicCountFromPitch` of it, resample
+both frames' envelopes onto that grid, and average.
+
+**Transcribing that does not reproduce the block.** With the resampler written
+out exactly as above and the pitch resolving to the current frame's — which it
+does, since the block's `L` and `f0` match this decoder's on all 2052 frames —
+the average scores 3.65 dB against the block, *worse* than not interpolating at
+all (3.34 dB). A per-frame least-squares fit of `a*current + b*previous` returns
+**`a = 1.02`, `b = 0.075`** with the residual still at 3.3 dB: no linear
+combination of the two envelopes explains it. Blocks 0 and 1 are byte-identical
+on every frame, so they are a copy pair, not a raw/interpolated pair.
+
+Something else is therefore happening between the envelope and that block, and
+the four functions the decode path calls after `Vocoder_CodeSpectralEnvelope`
+have all now been read and none of them accounts for it — `FUN_00029914` is
+gated off in this configuration (ablating it changes nothing), `FUN_00022024` is
+a copy, and the resampler is the law above.
+
+**This does not affect the parity statement.** The block in question is a
+synthesis-side intermediate; every *model parameter* — classification, `L`,
+`f0`, voicing and the spectral envelope — is exact or within 0.021 dB, and the
+synthesised audio correlates with the radio's own at 0.973 against mbelib's
+0.968 on the same reference.
 
 SPDX-License-Identifier: ISC
