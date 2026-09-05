@@ -16,7 +16,7 @@
  *
  *   Vocoder_ComputeHarmonicGains        0x0001D71C   here
  *   Vocoder_SynthesizeHarmonicSpectrum  0x0001D4C8   here
- *   Vocoder_InterpolateSpectralEnvelope 0x0001D9F0   not yet
+ *   Vocoder_InterpolateSpectralEnvelope 0x0001D9F0   here
  *   Vocoder_SynthesizeVoiced            0x0001DE10   not yet
  *
  * SPDX-License-Identifier: ISC
@@ -324,4 +324,190 @@ lookup:
     *exp_out = ambe_fft_inverse(fft, e, 8, 0);
     dest[0x100] = dest[0];
     return (short)written;
+}
+
+/*
+ * One windowed, interpolated sample of the synthesised block.
+ *
+ * `pos` is a Q16 position into `block`, whose integer part indexes it and whose
+ * fraction interpolates between that sample and the next - which is why the
+ * block carries a wrap sample at [0x100]: at index 0xFF this reads 0x100.
+ * `phase` drives the raised cosine (0x8000 - cos) >> 1.
+ *
+ * The product is taken as bits [46:15] of a 64-bit multiply, `(hi << 17) |
+ * (lo >> 15)`, the same reassembly FUN_00018a2c does - the machine has no
+ * 64-bit shift, so it rebuilds the field from the register pair.  Written as
+ * `(int32_t)(prod >> 15)` it is the same 32 bits and the tests cannot tell them
+ * apart; it is kept in the machine's form because that is what the code says.
+ */
+static int32_t win_sample(const uint16_t *block, int32_t pos, int32_t phase)
+{
+    uint32_t idx = (uint32_t)(pos >> 16) & 0xff;
+    int32_t base = (int32_t)((uint32_t)block[idx] << 16) >> 1;
+    int32_t next = (int32_t)((uint32_t)block[idx + 1] << 16) >> 1;
+    int32_t frac = pos - ambe_shl32(pos >> 16, 16);
+    int32_t lerp = base + (int32_t)(int16_t)(((uint32_t)frac & 0x1ffff) >> 1)
+                        * (int32_t)(int16_t)((uint32_t)(next - base) >> 16) * 2;
+    int32_t w = (int32_t)(int16_t)((((uint32_t)0x8000
+                    - (uint32_t)ambe_cos_q15((int16_t)(((uint32_t)phase & 0x3fffff) >> 6)))
+                    & 0x1ffff) >> 1);
+    int64_t prod = (int64_t)w * (int64_t)lerp;
+
+    return (int32_t)(((uint32_t)(prod >> 32) << 17) | ((uint32_t)prod >> 15));
+}
+
+/* the same without the window, which is what the flat middle runs */
+static int32_t flat_sample(const uint16_t *block, int32_t pos)
+{
+    uint32_t idx = (uint32_t)(pos >> 16) & 0xff;
+    int32_t base = (int32_t)((uint32_t)block[idx] << 16) >> 1;
+    int32_t next = (int32_t)((uint32_t)block[idx + 1] << 16) >> 1;
+    int32_t frac = pos - ambe_shl32(pos >> 16, 16);
+
+    return base + (int32_t)(int16_t)((uint32_t)(next - base) >> 16)
+                * (int32_t)(int16_t)(((uint32_t)frac & 0x1ffff) >> 1) * 2;
+}
+
+/*
+ * Vocoder_InterpolateSpectralEnvelope 0x0001D9F0, whole.
+ *
+ * The name is the decompiler's and it misleads: nothing here touches the
+ * spectral envelope.  This resamples the 256-sample block the harmonic
+ * synthesiser produced - `block` is that buffer - at the harmonic's own pitch,
+ * windows it, and adds it into the output accumulator.  It runs once per
+ * harmonic, and it is where the previous frame's harmonics fade out against
+ * this frame's.
+ *
+ * Three loops: taper in under a rising raised cosine, run flat, taper out under
+ * a falling one.  The flat middle is not the window at 1 - it skips the cosine
+ * lookup and the 64-bit multiply entirely.
+ *
+ * `mant` and `exp` are a block float saying where in the accumulator this
+ * harmonic starts; the end is that plus 1/pitch, clamped to 0xA6.  A start
+ * whose integer part is below -0x10 writes nothing and returns.
+ *
+ * The counts are 16-bit truncations and that is load-bearing: for a start
+ * before the accumulator the rising half's count is `(uint16_t)start + 0x10`,
+ * which is 0x10 + start rather than 0x10, so the taper begins part-way through.
+ */
+void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
+                                 uint16_t pitch, const uint16_t *block,
+                                 int16_t block_exp)
+{
+    int32_t scaled, pos, step = (int32_t)(int16_t)pitch * 0x20;
+    int32_t win_up, win_dn;
+    uint32_t first, cursor, nrise, endp1, byteoff;
+    int16_t start_i, end_i, limit, count, e = (int16_t)(block_exp - 0x10);
+    int32_t *outp;
+    int sh, i;
+
+    /* where this harmonic starts, rounded up to the next whole sample */
+    sh = (int16_t)(exp - 0xf);
+    scaled = sh < 0 ? asr_hw(ambe_shl32(mant, 16), -sh)
+                    : lsl_hw(ambe_shl32(mant, 16), sh);
+    first = (uint32_t)scaled + 0xffff;
+    start_i = (int16_t)(first >> 16);
+
+    /* and where it ends: this position plus one period */
+    {
+        uint32_t ph = (uint32_t)pitch << 16;
+        int16_t pe, e1, e2;
+        uint16_t q;
+        uint32_t v;
+
+        if (pitch == 0) { pe = -4; sh = 0; }
+        else            { sh = nsh((int32_t)ph); pe = (int16_t)(-4 - sh); }
+        q = ambe_float_div_exp(0x40000000, 1, nhi((int32_t)ph, sh), pe, &e1);
+        q = ambe_float_add(mant, exp, q, e1, &e2);
+
+        sh = (int16_t)(e2 - 0xf);
+        v = (uint32_t)(sh < 0 ? asr_hw(ambe_shl32((int32_t)(uint32_t)q, 16), -sh)
+                              : lsl_hw(ambe_shl32((int32_t)(uint32_t)q, 16), sh));
+        end_i = (int16_t)(v >> 16);
+        if (end_i > 0xa6) {
+            end_i = 0xa6;
+            v = (uint32_t)0xa6 << 16;
+        }
+        if (end_i < 0x97) {
+            if ((int16_t)(end_i + 0x10) < 1)
+                return;                    /* wholly before the accumulator */
+            limit = (int16_t)(end_i + 0x11);
+        } else {
+            limit = 0xa7;
+        }
+        /* the falling window's phase, and the flat section's end */
+        win_dn = (asr_hw((int32_t)((v - (uint32_t)ambe_shl32((int32_t)(v >> 16), 16)) * 0x8000), 15)
+                  & (int32_t)0xfffffffe) + 0xf0000;
+        endp1 = (uint32_t)((uint16_t)end_i + 1);
+    }
+
+    {   /* the fractional part of the start drives both accumulators */
+        uint32_t frac = ((uint32_t)(ambe_shl32(start_i, 16) - scaled) & 0x1ffff) >> 1;
+
+        win_up = asr_hw(ambe_shl32((int32_t)frac, 16), 15);
+        pos    = asr_hw((int32_t)(int16_t)pitch * (int32_t)(int16_t)frac * 2, 11);
+    }
+
+    if (start_i < 0) {
+        int32_t back = start_i < -0x10 ? 0x100000 : start_i * -0x10000;
+
+        pos += (int32_t)(int16_t)pitch
+             * (int32_t)(int16_t)(-(int16_t)(first >> 16)) * 0x20;
+        win_up += back;
+        if (end_i < 0)
+            win_dn += (int32_t)(endp1 << 16);
+        cursor  = 0;
+        byteoff = 0;
+    } else {
+        cursor  = first >> 16;
+        byteoff = (uint32_t)start_i;
+    }
+    outp  = env + byteoff;
+    nrise = (uint32_t)((((first >> 16) + 0x10) - cursor) & 0xffff);
+    count = (int16_t)(((first >> 16) + 0x10) - cursor);
+
+    /* 1. taper in */
+    if (count > 0) {
+        cursor = (cursor + nrise) & 0xffff;
+        for (i = 0; i < count; i++) {
+            outp[i] += e < 0 ? asr_hw(win_sample(block, pos, win_up), -e)
+                             : lsl_hw(win_sample(block, pos, win_up), e);
+            win_up += 0x10000;
+            pos    += step;
+        }
+        /* the stock code advances the position by the UNSIGNED count and the
+           loop by the signed one; they are the same 16 bits and the loop only
+           runs when that is positive, so advancing in the loop is equivalent */
+        outp += nrise;
+    }
+
+    /* 2. run flat */
+    {
+        int16_t nflat = (int16_t)(endp1 - cursor);
+
+        if (nflat > 0) {
+            uint32_t n = (endp1 - cursor - 1) & 0xffff;
+
+            cursor += (uint32_t)nflat;
+            for (i = 0; i <= (int)n; i++) {
+                outp[i] += e < 0 ? asr_hw(flat_sample(block, pos), -e)
+                                 : lsl_hw(flat_sample(block, pos), e);
+                pos += step;
+            }
+            outp += n + 1;
+        }
+    }
+
+    /* 3. taper out */
+    {
+        int16_t ntail = (int16_t)(limit - (int16_t)cursor);
+
+        for (i = 0; i < ntail; i++) {
+            int32_t v = win_sample(block, pos, win_dn);
+
+            pos    += step;
+            win_dn -= 0x10000;
+            outp[i] += e < 0 ? asr_hw(v, -e) : lsl_hw(v, e);
+        }
+    }
 }

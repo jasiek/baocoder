@@ -26,4 +26,11 @@ short ambe_voiced_harmonic_spectrum(int32_t *fft, int16_t *exp_out,
                                     const uint16_t *amp, int16_t exp_bias,
                                     int end, int start, int16_t mark);
 
+/* Vocoder_InterpolateSpectralEnvelope 0x0001D9F0.  `env` is 0xA8 ints and
+   `block` the 0x101 shorts the spectrum builder wrote, wrap sample included -
+   the interpolator reads block[i + 1] and i reaches 0xFF. */
+void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
+                                 uint16_t pitch, const uint16_t *block,
+                                 int16_t block_exp);
+
 #endif /* AMBE_VOICED_INT_H */

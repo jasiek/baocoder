@@ -37,6 +37,7 @@ import emu
 
 GAINS = 0x0001D71C
 SPEC  = 0x0001D4C8
+INTERP = 0x0001D9F0
 OUT_G = 0x00051000        # 0x38 ushort
 OUT_I = 0x00051100        # 0x38 ushort
 NMAX  = 0x38
@@ -51,6 +52,14 @@ S_PHASE = 0x00051600      # NMAX ushort
 S_VOICE = 0x00051700      # NMAX short
 S_AMP   = 0x00051800      # NMAX ushort
 NDEST   = 0x102
+
+# Vocoder_InterpolateSpectralEnvelope's two buffers.  The accumulator is 0xA8
+# ints - the stock code clamps its last write to 0xA6 and writes one past it -
+# and is given four more so an overrun is visible rather than silent.
+I_ENV   = 0x00051A00      # NENV ints
+I_BLOCK = 0x00051D00      # 0x101 shorts, the block the spectrum builder wrote
+NENV    = 0xA8 + 4
+NBLOCK  = 0x101
 
 
 def _cases():
@@ -142,6 +151,79 @@ def _spec_cases():
     return out
 
 
+def _interp_cases():
+    """(mant, exp, pitch, block_exp, env[], block[]).
+
+    `mant`/`exp` place the harmonic in the accumulator as a block float, and
+    the interesting values are the ones near the edges of it: a start before
+    zero, which shortens the rising taper by a 16-bit truncation rather than
+    clipping it, a start below -0x10, which returns having written nothing, and
+    an end past 0xA6, which is clamped.  The envelope is poked with a recognisable
+    ramp rather than zeros, because this function ACCUMULATES - a transcription
+    that assigned instead of adding would pass against a zeroed buffer.
+
+    Cases whose start lands OUTSIDE the accumulator are filtered out, and the
+    reason is not squeamishness: the stock code does not range-check its
+    destination, so it happily writes 0x10 taper samples at pDest + start for any
+    start its caller hands it.  Under the emulator that lands in scratch and the
+    peek never sees it; in a C transcription it is a wild write.  The caller
+    cannot produce such a start - the block float comes from bounded gains - so
+    the sweep does not either, and the function is documented as trusting its
+    caller the way the stock one does.
+    """
+    def start_index(mant, exp):
+        """The same arithmetic the function opens with, to filter on."""
+        sh = ((exp - 0xf) + 0x8000) % 0x10000 - 0x8000
+        v = (mant << 16) & 0xFFFFFFFF
+        if v >= 0x80000000:
+            v -= 0x100000000
+        if sh < 0:
+            n = min(-sh, 63)
+            v = v >> n if n < 32 else (-1 if v < 0 else 0)
+        else:
+            n = min(sh, 63)
+            v = ((v << n) & 0xFFFFFFFF) if n < 32 else 0
+        first = ((v & 0xFFFFFFFF) + 0xffff) & 0xFFFFFFFF
+        i = (first >> 16) & 0xFFFF
+        return i - 0x10000 if i >= 0x8000 else i
+
+    def in_range(mant, exp):
+        # The rising taper is 0x10 long and runs from the start unconditionally
+        # - only the END is clamped to 0xA6 - so a start at 0xA6 writes to 0xB6,
+        # past the 0xA8-int accumulator.  The caller never places one there; the
+        # sweep must not either, or the fixture records the firmware scribbling.
+        i = start_index(mant, exp)
+        return -0x20 <= i <= 0x90
+    out = []
+    x = 13579
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    env0  = [((i * 37) & 0xFFFF) - 0x8000 for i in range(NENV)]
+    block = [(i * 251) & 0xFFFF for i in range(NBLOCK)]
+
+    for pitch in (0x1079, 0x4027, 0x0800, 0x2000, 0x7FFF, 1):
+        for exp in (0, 4, 8, 0xf, 0x10, 0x14, -4):
+            for mant in (0, 1, 0x100, 0x4000, 0x7FFF, -1, -0x100, -0x4000,
+                         0x20, 0x50, 0xa6, -0x10, -0x11, -0x1f):
+                if in_range(mant, exp):
+                    out.append((mant, exp, pitch, 0x10, env0, block))
+    for bexp in (0, 0x10, 0x18, 8, -8):
+        out.append((0x50, 0xf, 0x1079, bexp, env0, block))
+    tries = 0
+    while len(out) < 900 and tries < 20000:
+        tries += 1
+        mant, exp = rnd(0x10000) - 0x8000, rnd(41) - 20
+        if not in_range(mant, exp):
+            continue
+        out.append((mant, exp, rnd(0x10000), rnd(41) - 12, env0,
+                    [rnd(0x10000) for _ in range(NBLOCK)]))
+    return out
+
+
 def gen(jobfile):
     cases = _cases()
     j = emu.Job()
@@ -164,9 +246,15 @@ def gen(jobfile):
         j.getreg("r0")
         j.peek("sd%d" % i, S_DEST, NDEST * 2)
         j.peek("se%d" % i, S_EXP, 2)
+    for i, (mant, exp, pitch, bexp, env, blk) in enumerate(_interp_cases()):
+        j.poke(I_ENV,   struct.pack("<%di" % NENV, *env))
+        j.poke(I_BLOCK, struct.pack("<%dH" % NBLOCK, *blk))
+        j.call(INTERP, I_ENV, mant & 0xFFFFFFFF, exp & 0xFFFFFFFF,
+               pitch & 0xFFFFFFFF, I_BLOCK, bexp & 0xFFFFFFFF)
+        j.peek("ie%d" % i, I_ENV, NENV * 4)
     j.write(jobfile)
-    print("wrote %s: %d gain cases, %d spectrum cases"
-          % (jobfile, len(cases), len(_spec_cases())))
+    print("wrote %s: %d gain, %d spectrum, %d interpolate"
+          % (jobfile, len(cases), len(_spec_cases()), len(_interp_cases())))
     return len(cases)
 
 
@@ -193,10 +281,11 @@ def export(outfile, dest):
         elif line.startswith("FAULT "):
             ok.append(False)
     # the job runs the gain cases first, then the spectrum ones
-    assert len(ok) == len(cases) + len(_spec_cases()), (
-        "%d outcomes for %d + %d calls" % (len(ok), len(cases), len(_spec_cases())))
-    spec_ok = ok[len(cases):]
-    assert all(spec_ok), "%d spectrum calls faulted" % spec_ok.count(False)
+    assert len(ok) == len(cases) + len(_spec_cases()) + len(_interp_cases()), (
+        "%d outcomes for %d + %d + %d calls" % (len(ok), len(cases),
+        len(_spec_cases()), len(_interp_cases())))
+    rest = ok[len(cases):]
+    assert all(rest), "%d later calls faulted" % rest.count(False)
     n = skipped = 0
     with open(dest, "w") as fh:
         fh.write("# Vocoder_ComputeHarmonicGains 0x0001D71C, called directly under the\n"
@@ -242,6 +331,24 @@ def export(outfile, dest):
                 r0[i] - 0x10000 if r0[i] >= 0x8000 else r0[i]))
             m += 1
     print("%s: %d spectrum cases" % (sdest, m))
+
+    idest = dest.replace("gains", "interp")
+    with open(idest, "w") as fh:
+        fh.write("# Vocoder_InterpolateSpectralEnvelope 0x0001D9F0, called directly\n"
+                 "# under the p-code emulator.  tools/fw_oracle/gen_vhelper_jobs.py.\n"
+                 "# per record: mant exp pitch blockExp, %d ints of accumulator in,\n"
+                 "#   %d shorts of block, then %d ints of accumulator out.  The input\n"
+                 "#   accumulator is a ramp, not zeros: this function ADDS, and a\n"
+                 "#   transcription that assigned would pass against a zeroed buffer.\n"
+                 % (NENV, NBLOCK, NENV))
+        q = 0
+        for i, (mant, exp, pitch, bexp, env, blk) in enumerate(_interp_cases()):
+            o = struct.unpack("<%di" % NENV, res["peek"]["ie%d" % i][0])
+            fh.write("%d %d %d %d %s %s %s\n" % (
+                mant, exp, pitch, bexp, " ".join(map(str, env)),
+                " ".join(map(str, blk)), " ".join(map(str, o))))
+            q += 1
+    print("%s: %d interpolate cases" % (idest, q))
     return n
 
 

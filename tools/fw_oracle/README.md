@@ -161,7 +161,19 @@ radio faults on.
 
 The output buffers are poked `0xEEEE` before each call, so a short the firmware
 did not write reads as 61166 rather than as a plausible zero. That is what
-catches a transcription writing the right values into the wrong slots.
+catches a transcription writing the right values into the wrong slots. The
+envelope interpolator's accumulator is poked with a ramp for the same reason:
+that function *adds*, and a transcription that assigned would pass against a
+zeroed buffer.
+
+`Vocoder_InterpolateSpectralEnvelope 0x0001D9F0` needs one more restraint. It
+does not range-check its destination: the rising taper is 0x10 long and runs
+from the start position unconditionally - only the *end* is clamped, to 0xA6 -
+so a start at 0xA6 writes to 0xB6, past the 0xA8-int accumulator. Under the
+emulator that lands in scratch and the peek never sees it, which is a fixture
+recording the firmware scribbling. The caller cannot produce such a start, so
+the sweep filters them out by re-deriving the start index in Python, and the
+test asserts that no case wrote past 0xA8.
 
 ## The voiced synthesiser
 

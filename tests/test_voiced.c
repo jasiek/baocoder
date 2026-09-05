@@ -9,6 +9,7 @@
  *
  *   Vocoder_ComputeHarmonicGains        0x0001D71C   here
  *   Vocoder_SynthesizeHarmonicSpectrum  0x0001D4C8   here
+ *   Vocoder_InterpolateSpectralEnvelope 0x0001D9F0   here
  *
  * The fixture's output buffers were poked 0xEEEE before each call, so a short
  * the firmware did not write reads as 61166 rather than as a plausible zero -
@@ -30,6 +31,21 @@
  * phase, and the block-float shift cannot reach 32.  ambe_voiced.c carries the
  * range arguments.
  *
+ * The interpolator was put through the same:
+ *
+ *   the window on the rising taper           262 of 900 still pass
+ *   the wrap sample block[idx + 1]           299
+ *   accumulating rather than assigning       346
+ *   the falling window running backwards     399
+ *   rounding the start position up           470
+ *   the end clamp at 0xA6                    crashes - it is what keeps the
+ *                                            writes inside the accumulator
+ *
+ * Replacing `(hi << 17) | (lo >> 15)` with `(int32_t)(prod >> 15)` changes
+ * nothing, and that is not a gap either: the two are the same 32 bits.  The
+ * stock code reassembles them from a register pair because it has no 64-bit
+ * shift, not because it wants a different answer.
+ *
  * SPDX-License-Identifier: ISC
  */
 #include "ambe.h"
@@ -38,6 +54,8 @@
 
 #define NMAX  0x38
 #define NDEST 0x102
+#define NENV  (0xA8 + 4)
+#define NBLOCK 0x101
 
 int main(void)
 {
@@ -170,6 +188,67 @@ int main(void)
         printf("[Vocoder_SynthesizeHarmonicSpectrum: %d cases, %d bit-exact "
                "through the inverse transform, %d of them silent] ",
                sn, sok, silent);
+    }
+
+    {   /* Vocoder_InterpolateSpectralEnvelope: the resample-and-window that
+           adds one harmonic into the output.  The fixture's input accumulator
+           is a ramp rather than zeros, so a transcription that assigned where
+           the radio adds cannot pass. */
+        FILE *g = fixture_open("voiced_interp.fw");
+        int in = 0, iok = 0, untouched = 0, clipped = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            long mant, exp, pitch, bexp;
+            static int32_t env[NENV], ref[NENV];
+            static uint16_t blk[NBLOCK];
+            char *p = line;
+            int k, bad = 0, same = 1;
+
+            if (line[0] == '#')
+                continue;
+            mant = strtol(p, &p, 10); exp   = strtol(p, &p, 10);
+            pitch = strtol(p, &p, 10); bexp = strtol(p, &p, 10);
+            for (k = 0; k < NENV; k++)   env[k] = (int32_t)strtol(p, &p, 10);
+            for (k = 0; k < NBLOCK; k++) blk[k] = (uint16_t)strtoul(p, &p, 10);
+            for (k = 0; k < NENV; k++)   ref[k] = (int32_t)strtol(p, &p, 10);
+
+            for (k = 0; k < NENV; k++)
+                if (env[k] != ref[k])
+                    same = 0;
+            if (same)
+                untouched++;
+            for (k = 0xA8; k < NENV; k++)
+                if (ref[k] != env[k])
+                    clipped++;      /* the firmware ran past 0xA8 - it must not */
+
+            ambe_voiced_interp_envelope(env, (int32_t)mant, (int16_t)exp,
+                                        (uint16_t)pitch, blk, (int16_t)bexp);
+            for (k = 0; k < NENV; k++)
+                if (env[k] != ref[k]) {
+                    CHECK(0, "interp case %d (mant %ld exp %ld pitch %ld bexp %ld) "
+                             "slot %d: %d, firmware %d\n",
+                          in, mant, exp, pitch, bexp, k,
+                          (int)env[k], (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                iok++;
+            in++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(in > 800, "only %d interpolate cases in the fixture\n", in);
+        CHECK(untouched > 0, "no case returns without writing, which is the "
+                             "start-before--0x10 path at 0x0001DA5E\n");
+        CHECK(clipped == 0, "the firmware wrote past the 0xA8-int accumulator "
+                            "on %d slots\n", clipped);
+        CHECK(iok == in, "Vocoder_InterpolateSpectralEnvelope exact on %d of %d\n",
+              iok, in);
+        printf("[Vocoder_InterpolateSpectralEnvelope: %d cases, %d bit-exact, "
+               "%d writing nothing] ", in, iok, untouched);
     }
 
     CHECK(clamped > 0, "no harmonic reaches the clamp, where the gain would "
