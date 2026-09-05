@@ -37,7 +37,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | Golay(23,12) / (24,12) | `src/golay.c` | firmware `Golay23_Decode` `0x00015230`, `Vocoder_ComputeParityCode` `0x00022DF4` |
 | 72-bit on-air frame ↔ 49-bit payload | `src/ambe_fec.c` | firmware `Vocoder_DescrambleVoiceFrame` `0x0001893C`, `Vocoder_DeinterleaveVoiceBits` `0x000230A4`, `Dsp_LcgSignScramble` `0x00021FE0` |
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
-| Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
+| Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis, **ours, not the firmware's** — the radio's voiced synthesiser `Vocoder_SynthesizeVoiced` `0x0001DE10` is not transcribed; `Vocoder_SynthesizeFrame` `0x00019DB8` is the frame it sits in |
 | Windowed FFT (PCM -> spectrum) | `src/ambe_fft.c` | firmware `Dsp_WindowAndComputeFft` `0x00019B6C`, `Dsp_FftForward` `0x000256D0`, `Dsp_FftBitReverseScale` `0x00025224`, the two butterfly kernels `0x00025160` / `0x0002509C` |
 | Unvoiced excitation | `src/ambe_unvoiced.c` | **transcribed and bit-exact**: firmware `Vocoder_SynthesizeUnvoiced` `0x0001AFE0`, `Vocoder_BuildFrameResetPattern` `0x00022CD0`, `FUN_0001abdc` |
 | Fixed-point primitives (log2, pow2, sqrt, cos, divide) | `src/ambe_basop.c` | firmware `Math_Log2` `0x0001903C`, `Math_Pow2` `0x000191C0`, `Math_Sqrt` `0x00019364`, `Math_TableInterpLookup` `0x00019000`, `Math_SDiv` `0x00018D74` |
@@ -279,14 +279,31 @@ when the return is `AMBE_FRAME_VOICE`, and the header says so.
 
 ### What is left, and it is one layer
 
-* **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is not implemented here** —
-  the radio interpolates this frame's spectral envelope with the previous one
-  onto a common pitch before synthesising, and this decoder interpolates in the
-  overlap-add instead. That, and not any error in the envelope decode, was the
-  "1.15 dB amplitude gap": the fixture had been exported from the block *after*
-  that stage. Against the frame's own decoded envelope — the fourth parameter
-  block, at `+0x198` — `log2Ml` agrees to **0.021 dB** over every voice frame of
-  all six captures. `docs/amplitude-gap.md` has the chase and the chain read.
+The layer is synthesis, and what is missing has a specific shape: three of its
+four stages are transcribed and bit-exact against the firmware, and none of them
+is in the decode path, because the stage that would call them is not written.
+
+* **`Vocoder_SynthesizeVoiced 0x0001DE10` has no transcription.** It is the one
+  remaining stage with none. `ambe_decode_bits` calls `ambe_synthesize`
+  instead — `src/ambe_synth.c`, which is mbelib's time-domain sum of sinusoids
+  under a generated trapezoid, and says so in its header. That is why
+  `test_synth` compares spectra and levels rather than samples: 0.973 mean band
+  correlation against the radio's own audio, not equality. Parity holds through
+  the parameters and stops at the audio.
+* **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is implemented and exact, but
+  unwired** — `src/ambe_blend.c`, bit-exact on pitch, `L` and envelope over
+  **232 firmware calls** (`test_blend`). So are `Vocoder_SynthesizeUnvoiced`
+  (`src/ambe_unvoiced.c`, 206 calls) and the output filter
+  (`src/ambe_postfilter.c`, 205 calls). All three are public API and none is
+  reachable from `ambe_decode_bits`: the radio hands the resampled envelope to
+  an inverse-FFT synthesiser, and this decoder has no such synthesiser to hand
+  it to. They are waiting on the bullet above, not on anything of their own.
+* The resample is also what the **"1.15 dB amplitude gap"** turned out to be —
+  not an error in the envelope decode, but a fixture exported from the block
+  *after* that stage. Against the frame's own decoded envelope — the fourth
+  parameter block, at `+0x198` — `log2Ml` agrees to **0.021 dB** over every
+  voice frame of all six captures. `docs/amplitude-gap.md` has the chase and
+  the chain read.
 * **What the radio parks on a non-voice frame**, 0.345 log2 and flat across a
   run. This decoder synthesises comfort noise from the frame's own decoded
   envelope; the radio's array is something else. It is a separate question from
