@@ -39,12 +39,13 @@ BRK_SYNTH_OUT = 0x00016D5A
 BRK_AFTER_UV  = 0x00019ED2     # after Vocoder_SynthesizeUnvoiced 0x0001AFE0
 BRK_AFTER_V   = 0x00019EF2     # after Vocoder_SynthesizeVoiced   0x0001DE10
 BRK_AFTER_PF  = 0x00019EFE     # after FUN_00018a2c
-# The decompiler renders Vocoder_SynthesizeUnvoiced and FUN_00018a2c as both
-# taking aiStack_338.  The registers say otherwise: the unvoiced side gets
-# 0x00057B10 and the filter gets 0x00057AD0, sixteen ints lower.  Peek from the
-# lower of the two and cover both.
+# aiStack_338, measured at all three call sites: Vocoder_SynthesizeUnvoiced,
+# Vocoder_SynthesizeVoiced and FUN_00018a2c are all handed 0x00057AD0, which is
+# what the decompiler says.  An earlier recon of mine read 0x00057B10 for the
+# unvoiced call and I wrongly concluded the decompiler had mismarshalled the
+# arguments; re-measuring all three together disagrees with that reading, and
+# the postfilter fixture is bit-exact at 0x00057AD0 over 13 280 samples.
 ACC           = 0x00057AD0
-ACC_UV        = 0x00057B10
 ACC_LEN       = 100 * 4
 BLK_INTERP    = 0x00057E14     # the interpolated block, first half
 BLK_PARAMS    = 0x00045AA4     # PARAMS+0x000, second half

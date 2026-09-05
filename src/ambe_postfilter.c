@@ -15,6 +15,11 @@
  * (0.9427, 0.9699 and 0.9428) and six words of state at the very start of the
  * channel context.
  *
+ * It is not synthesis-only.  Vocoder_ScaleSamplesForAnalysis 0x00018BCC calls
+ * it twice as well, so the same cascade shapes the input audio before analysis;
+ * the state it uses there is a different block.  That makes this the codec's
+ * general shaping filter rather than an output stage.
+ *
  * Two things are load-bearing and neither is obvious from the source:
  *
  *   The second section continues from the UNSATURATED 64-bit result of the
