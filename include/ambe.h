@@ -193,6 +193,16 @@ int ambe_harmonic_count(int32_t f0_q19);
  * Two cascaded second-order sections with six words of state; FUN_00018a2c in
  * the Ghidra database, which only execution identified.
  */
+/*
+ * The unvoiced excitation's state, pChannelState+0x648: [0] the noise
+ * generator's carry, [1..0x54] its history, [0x55..] the previous segment's
+ * overlap-add tail, [0xa9] its exponent.  src/ambe_unvoiced.c.
+ */
+#define AMBE_UNVOICED_STATE 170
+typedef struct { int16_t s[AMBE_UNVOICED_STATE]; } ambe_unvoiced_state;
+void ambe_unvoiced_reset(ambe_unvoiced_state *u);
+void ambe_unvoiced_advance_noise(ambe_unvoiced_state *u, int n);
+
 typedef struct { int32_t s[6]; } ambe_postfilter_state;
 void ambe_postfilter_reset(ambe_postfilter_state *f);
 void ambe_postfilter(ambe_postfilter_state *f, int32_t *acc, int n);
