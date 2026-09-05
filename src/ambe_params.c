@@ -16,8 +16,16 @@
  *   Vocoder_DecodeSpectralCodebookEntry 0x00022DB4  codebook fetch (PRBA/HOC)
  *   Vocoder_BlendSpectralCodebookEntries 0x0002343C
  *   Vocoder_ExpandSpectralCodebookEntry 0x0002AFAC
- *   Vocoder_ComputeHarmonicResampleRatio 0x000269B0 eq. 40/41 (prevL/curL)
- *   Vocoder_ResampleSpectralEnvelope    0x00026A84  eq. 43 blend of log2Ml
+ *   Vocoder_ComputeHarmonicResampleRatio 0x000269B0 resamples an envelope by
+ *                                       the FREQUENCY ratio f0_out/f0_src,
+ *                                       not the eq. 40/41 prevL/curL index
+ *                                       ratio the predictor below uses
+ *   Vocoder_ResampleSpectralEnvelope    0x00026A84  averages this frame's
+ *                                       envelope with the previous one on a
+ *                                       common pitch; its output is a stack
+ *                                       block, not a parameter block, and
+ *                                       this decoder has no counterpart -
+ *                                       see docs/amplitude-gap.md
  *   Vocoder_ComputeFrameGainValue       0x00022E70  gamma accumulation
  *   Vocoder_UnpackSilenceDescriptor     0x000295F8  silence-frame path
  *   Vocoder_CodeSpectralCoefficients    0x000220D4  the codebook fetches, and

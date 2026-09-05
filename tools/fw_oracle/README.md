@@ -44,6 +44,26 @@ the firmware's.
 At each wake it peeks the payload buffer, the ring, and the parameter block at
 `pCtx+1000`, whose layout is `Vocoder_CopyFrameParamsWithReset 0x00019CBC`'s.
 
+## Breaking inside the interpolator
+
+`resample_probe.py` is a different kind of job: it stops the emulator *inside*
+`Vocoder_ResampleSpectralEnvelope 0x00026A84` and reads the two scratch arrays
+the interpolation is built from, which is the only way to see which of its three
+pitch branches fired.
+
+```sh
+python3 tools/fw_oracle/resample_probe.py /tmp/probe.job /tmp/frames.txt 360
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/probe.job /tmp/probe.out
+python3 tools/fw_oracle/resample_probe.py --check /tmp/probe.out
+```
+
+The check re-derives the pitch selection, both resamplings and the mix from the
+peeked bytes and reports how many of each match the firmware exactly.  It is not
+part of `make test`: it needs the emulator, and it produces a measurement rather
+than an assertion about this library.  Its frame feed drifts from the corpus -
+see the module docstring - so its output is not comparable with the `.fw*`
+fixtures frame by frame, and every check it makes is within a single stop.
+
 ## The payload permutation
 
 The firmware's 49-bit buffer is in **field order** - `b0`(7) `b1`(5) `b2`(5)

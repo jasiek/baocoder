@@ -13,7 +13,9 @@
  *   +0x04  L
  *   +0x08  voicing, a uint32 of 16 two-bit crumbs (with +0x0A)
  *   +0x0C  f0, Q19 turns per sample
- *   +0x10  0x38 shorts, the spectral amplitudes, post-enhancement
+ *   +0x10  0x38 shorts.  At the interpolator this is the envelope, log2 at
+ *          Q11; one wake later it has been converted in place to linear
+ *          block-float amplitudes, which is what .fwamps carries
  *
  * This is the parity test.  Everything above the amplitudes is required to be
  * exact - not bounded, not correlated - because the two are meant to be the
@@ -114,13 +116,13 @@ done:
  * `+0x198`, log2 at Q11 - which is exactly what `ambe_parms.log2Ml` is.  This
  * is the comparison that matters, and it is nearly exact.
  *
- * It is not the array `.fwamps` carries.  That one is `+0x10`, which
- * `Vocoder_ResampleSpectralEnvelope 0x00026A84` has since rewritten by
- * interpolating this frame's envelope with the previous frame's onto a common
- * pitch - a stage this decoder does not have.  Comparing against it, which is
- * what this test used to do, charged the envelope decode 1.15 dB for a missing
- * stage downstream of it.  cmp_interpolated below keeps that number, labelled
- * for what it is.
+ * It is not the array `.fwamps` carries.  That one is `+0x10`, and it is a
+ * different variable in different units: by the time the corpus peeks it, the
+ * block has been converted in place from log2 Q11 to LINEAR block-float
+ * amplitudes.  Comparing `log2Ml` against it, which is what this test used to
+ * do, charged the envelope decode 1.15 dB for a units and stage mismatch.
+ * cmp_synth_amplitudes below keeps that number as what it actually is - a
+ * comparison of `Ml`, not of the envelope.
  */
 static void cmp_envelope(const char *name, double *worst, double *sum, int *count)
 {
@@ -185,12 +187,19 @@ done:
 }
 
 /*
- * The interpolated envelope the radio actually synthesises from, on the one
- * capture whose array is carried.  Reported, not required: closing this needs
- * Vocoder_ResampleSpectralEnvelope written, and until it is the number is a
- * measure of a missing stage rather than of an error.
+ * The linear spectral amplitudes at `params+0x10`, on the one capture whose
+ * array is carried.  Not the envelope and not interpolated - breaking inside
+ * Vocoder_ResampleSpectralEnvelope 0x00026A84 shows it writes to a caller stack
+ * local and never touches the parameter context at all (docs/amplitude-gap.md,
+ * tools/fw_oracle/resample_probe.py).  What this block holds is `Ml` after the
+ * firmware's enhancement, exponentiated and block-float packed, so the mean is
+ * removed below and only the shape is compared.
+ *
+ * Reported, not required.  The residual is 1.12 dB with `ambe_enhance_spectrum`
+ * alone; adding `ambe_apply_unvoiced_gain` makes it 1.54 dB, so whatever else
+ * the firmware folds in here, it is not this decoder's unvoiced scaling.
  */
-static void cmp_interpolated(const char *name, double *sum, int *count)
+static void cmp_synth_amplitudes(const char *name, double *sum, int *count)
 {
     char pb[128];
     char *fb = NULL;
@@ -279,21 +288,21 @@ int main(void)
     /*
      * 0.020 dB, measured over every voice frame of all six captures.  This is
      * the spectral envelope against the radio's own, and it is the bound to
-     * tighten if the envelope chain is ever improved - not the interpolated
-     * figure below, which is a different quantity.
+     * tighten if the envelope chain is ever improved - not the amplitude
+     * figure below, which is a different quantity in different units.
      */
     CHECK(sum / count < 0.004,
           "envelope residual %.5f log2 (%.3f dB) above the measured 0.0034\n",
           sum / count, 6.02 * sum / count);
     CHECK(worst < 0.10, "worst envelope residual %.4f log2 too large\n", worst);
 
-    cmp_interpolated("dm32_arc4_1", &isum, &icount);
-    CHECK(icount > 100, "only %d frames for the interpolated comparison\n", icount);
+    cmp_synth_amplitudes("dm32_arc4_1", &isum, &icount);
+    CHECK(icount > 100, "only %d frames for the amplitude comparison\n", icount);
 
     printf("[%d frames, %d voice: L, f0, class and all %d voicing decisions "
            "exact; spectral envelope %.3f dB mean over %d frames, %.3f dB worst; "
-           "%.2f dB against the interpolated block the radio synthesises, which "
-           "is a stage this decoder does not have] ",
+           "%.2f dB of shape against the linear amplitudes at params+0x10, "
+           "which is a later stage in different units] ",
            frames, voice, harmonics, 6.02 * sum / count, count, 6.02 * worst,
            6.02 * isum / icount);
 

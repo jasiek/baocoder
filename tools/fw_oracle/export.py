@@ -8,9 +8,12 @@ capture's payloads and writes, per capture:
   <name>.fwenv     one line per frame: L int16 log2 amplitudes, Q11, from the
                    FOURTH parameter block at +0x198 - the frame's own decoded
                    spectral envelope, before the two-frame interpolation
-  <name>.fwamps    one line per frame: L int16 spectral amplitudes (params+0x10)
-                   - the block that is synthesised, i.e. AFTER
-                   Vocoder_ResampleSpectralEnvelope 0x00026A84
+  <name>.fwamps    one line per frame: L int16 values from params+0x10.  NOT the
+                   envelope and NOT interpolated: by the time this is peeked the
+                   block has been converted in place from log2 Q11 to linear
+                   block-float amplitudes.  Vocoder_ResampleSpectralEnvelope
+                   0x00026A84 writes to a caller stack local and never touches
+                   the parameter context - see docs/amplitude-gap.md
   <name>.fwpcm     raw int16 PCM, 160 samples per frame
 
 The parameter block layout is Vocoder_CopyFrameParamsWithReset 0x00019CBC's:

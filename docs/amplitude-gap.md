@@ -5,15 +5,27 @@ error**. The fixture was reading the wrong parameter block.
 
 ## What it actually is
 
-`tests/fixtures/*.fwamps` was exported from the block at `params+0x10`. That is
-the array `Vocoder_SynthesizeFrame 0x00019DB8` synthesises from — and by the time
-it is written, `Vocoder_ResampleSpectralEnvelope 0x00026A84` has replaced it with
-an **interpolation of this frame's envelope and the previous frame's** onto a
-common pitch. This decoder has no counterpart for that stage, so comparing
-`log2Ml` against it charged the envelope decode 1.15 dB for something downstream
-of it.
+`tests/fixtures/*.fwamps` was exported from the block at `params+0x10`, on the
+belief that it was the envelope after interpolation. It is neither the envelope
+nor interpolated. Breaking inside the interpolator (`tools/fw_oracle/resample_probe.py`)
+settles both halves:
 
-The frame's *own* decoded envelope is in the **fourth** parameter block, at
+* **`Vocoder_ResampleSpectralEnvelope 0x00026A84` does not write into the
+  parameter context at all.** Its output pointer is `0x00057E14`, a *caller's
+  stack local*. No block the corpus export can peek is its result.
+* **`params+0x10` changes format between the two wakes of a frame.** At the
+  interpolator it holds the frame's envelope, log2 at Q11. One wake later it has
+  been converted in place to linear block-float amplitudes — enhanced,
+  unvoiced-scaled and exponentiated. Measured on the same frame:
+  `[6838, 6940, 7961, ...]` becomes `[19948, 20649, 29171, ...]`, and
+  `2^(7961/2048)/2^(6838/2048) = 1.462` against `29171/19948 = 1.462`.
+
+So `.fwamps` and `.fwenv` are 13.8 dB apart because they are different
+variables in different units, not because anything decodes differently. The
+1.15 dB was a comparison between `log2Ml` and a linear `Ml` array taken three
+stages further down the pipeline.
+
+The frame's own decoded envelope is in the **fourth** parameter block, at
 `params+0x198` — `class +0`, `L +4`, `f0 +0xC`, envelope `+0x10`, log2 at Q11.
 Against that, over **every voice frame of all six captures**:
 
@@ -60,50 +72,79 @@ which is an independent confirmation of the field-ordered buffer layout.
 | `Vocoder_MatchExcitationEnergy 0x000277F8` | the enhancement; voice frames only, and **stateful** (two words at `pChannelState+0x7c0`) |
 | `FUN_00029914 0x00029914` | an adaptive smoother that pulls each harmonic toward the previous frame's resampled envelope with a frequency-dependent limit — **gated off** in this configuration; ablating it changes nothing |
 
+## Vocoder_ResampleSpectralEnvelope, executed
+
+The function is now transcribed and **verified bit-exactly against 232 live
+calls** rather than read. `tools/fw_oracle/resample_probe.py` arms a break at
+`0x00026BB4` — after the mix loop, where the output and both scratch arrays are
+simultaneously live — and re-derives every stage from the peeked bytes:
+
+```
+interpolating calls captured: 232
+  pitch branch  {'param_2 f0': 148, 'param_3 f0': 31, 'geometric mean': 53}
+  f0_out as predicted            232/232
+  local_104 reproduced bit-exact 232/232
+  local_94  reproduced bit-exact 232/232
+  out == clamp((l104+l94)/2)     232/232
+```
+
+Its three arguments, measured from the registers at the function's entry:
+
+| | |
+|---|---|
+| `param_1` | `0x00057E14`, a caller's stack local — **the output** |
+| `param_2` | `0x00045AA4` = `PARAMS+0x000`, the frame just decoded |
+| `param_3` | `0x00045C3C` = `PARAMS+0x198`, the retained previous frame |
+
+`param_3` at one call is `param_2` at the previous one: immediately after the
+interpolation, `PARAMS+0x198` receives a byte-exact copy of `PARAMS+0x000`
+(232/232), which is `FUN_00022024 0x00022024`. The two blocks are a delay line.
+
+The algorithm:
+
+1. **Pick a pitch**, from the two voicing words against the masks at
+   `0x00026C64` (`0x55555555`) and `0x00026C68` (`0xAAAAAAAA`) — alternate bit
+   planes of the packed voicing field, the same interleave
+   `ambe_pitchless_gain_mode()` keys off. Either frame having no voiced energy
+   selects the other frame's `f0` outright; both voiced gives
+   `Math_SqrtScaled(2*f0cur*f0prev)`, a geometric mean. Measured split: 148
+   current, 31 previous, 53 geometric mean, with zero mispredictions.
+2. **`Vocoder_HarmonicCountFromPitch 0x0002AD18`** of that pitch gives the
+   output `L`. On the geometric-mean branch this is a harmonic count belonging
+   to *neither* input frame.
+3. **Resample both envelopes onto that grid** with
+   `Vocoder_ComputeHarmonicResampleRatio 0x000269B0`. It builds a 60-entry
+   window — `buf[0] = src[0]`, `buf[k] = src[k-1]` for `k = 1..56`, three
+   edge-holds above — so index `k` *is* harmonic `k` and the inner loop needs no
+   bounds test. `Math_DivideNormalized 0x0002692C` gives `f0_out/f0_src` in Q16
+   (short-circuiting to `0x10000` when equal), and that ratio is accumulated
+   once per output harmonic:
+   **`out[l] = src at harmonic position l * f0_out / f0_src`**. Frequency
+   matched — a different law from the envelope predictor's `prevL/curL` *index*
+   ratio in `src/ambe_params.c`. The interpolation weight is `0x7FFF`, not
+   `0x8000`, so even an exact copy loses one LSB per entry; that off-by-one is
+   how the probe tells which branch fired.
+4. **Average**, `(a + b) / 2` through a 32-bit add-and-halve that stitches the
+   sign bit back with `lsli/or`, clamped to `[0x8801, 0x77FF]`.
+
 ## What is left
 
-**`Vocoder_ResampleSpectralEnvelope 0x00026A84` is not implemented here**, and
-it is the only thing that stands between this decoder and the block the radio
-synthesises from. It is now read in full, along with both of its helpers:
+**Where the interpolated frame goes is not established.** It is
+`Vocoder_DecodeAmbeFrame 0x0002033C`'s `pOutFrame`, but that function's
+rendering in `Vocoder_ProcessFrameSignaling 0x000198CC` —
+`Vocoder_DecodeAmbeFrame(pFrameParams, 0x44, pOutFrameParams, 0x44, ...)` —
+does not match the register arguments the emulator observes, so the decompiler
+cannot be trusted on the marshalling here and the claim is not made. Reading it
+means breaking further up the call chain, which is the obvious next step.
 
-* **`Vocoder_ComputeHarmonicResampleRatio 0x000269B0`** builds a 60-entry window
-  from a 56-entry envelope — `buf[0] = src[0]`, `buf[k] = src[k-1]` for
-  `k = 1..56`, three edge-holds above — so index `k` *is* harmonic `k` and
-  harmonic 0 holds harmonic 1. It takes `Math_DivideNormalized 0x0002692C` of
-  the two pitches (Q16, short-circuiting to `0x10000` when they are equal), then
-  accumulates that ratio once per output harmonic and linearly interpolates:
-  **`out[l] = src at harmonic position l * f0_out / f0_src`**. That is
-  frequency-matched resampling, and it is a different law from the envelope
-  predictor's `prevL/curL` index ratio in `src/ambe_params.c`.
-* **`FUN_00022024 0x00022024`** is a pure copy — class, `L`, `f0`, the voicing
-  word and the `L`-entry envelope from the frame's params into the prediction
-  state, padded to 56 with the last value. That is why the fourth block holds
-  the current frame's envelope by the time the emulator peeks it.
+If it is what the synthesiser consumes, then on the 53-in-232 frames that take
+the geometric-mean branch the radio synthesises at a pitch and harmonic count
+belonging to neither coded frame, and this decoder does not model that.
 
-So the algorithm reads as: pick a pitch (the current `f0`, the previous, or
-`sqrt(2*f0cur*f0prev)`, on the two voicing words against the masks at
-`0x00026C64`/`0x00026C68`), take `Vocoder_HarmonicCountFromPitch` of it, resample
-both frames' envelopes onto that grid, and average.
-
-**Transcribing that does not reproduce the block.** With the resampler written
-out exactly as above and the pitch resolving to the current frame's — which it
-does, since the block's `L` and `f0` match this decoder's on all 2052 frames —
-the average scores 3.65 dB against the block, *worse* than not interpolating at
-all (3.34 dB). A per-frame least-squares fit of `a*current + b*previous` returns
-**`a = 1.02`, `b = 0.075`** with the residual still at 3.3 dB: no linear
-combination of the two envelopes explains it. Blocks 0 and 1 are byte-identical
-on every frame, so they are a copy pair, not a raw/interpolated pair.
-
-Something else is therefore happening between the envelope and that block, and
-the four functions the decode path calls after `Vocoder_CodeSpectralEnvelope`
-have all now been read and none of them accounts for it — `FUN_00029914` is
-gated off in this configuration (ablating it changes nothing), `FUN_00022024` is
-a copy, and the resampler is the law above.
-
-**This does not affect the parity statement.** The block in question is a
-synthesis-side intermediate; every *model parameter* — classification, `L`,
-`f0`, voicing and the spectral envelope — is exact or within 0.021 dB, and the
-synthesised audio correlates with the radio's own at 0.973 against mbelib's
-0.968 on the same reference.
+**None of this moves the parity statement**, which is stated against the coded
+model parameters — classification, `L`, `f0`, voicing and the spectral envelope
+of `PARAMS+0x000`, all exact or within 0.021 dB — and the synthesised audio
+correlates with the radio's own at 0.973 against mbelib's 0.968 on the same
+reference.
 
 SPDX-License-Identifier: ISC
