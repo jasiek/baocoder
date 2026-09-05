@@ -83,14 +83,43 @@ int main(void)
             carried_ok++;
         n++;
     }
-    free(line);
     fclose(f);
 
     CHECK(n > 80, "only %d unvoiced calls in the fixture\n", n);
     CHECK(given_ok == n, "one-step exact on %d of %d\n", given_ok, n);
     CHECK(carried_ok == n, "exact carrying our own state on %d of %d\n", carried_ok, n);
 
-    printf("[%d firmware calls, %d generated values: the noise source is exact "
-           "one step at a time and across the whole run] ", n, n * NS);
-    return t_done("the unvoiced noise source vs the firmware");
+    /* ---- the windowed noise segment the transform is given ------------- */
+    {
+        FILE *g = fixture_open("dm32_arc4_1.fwuvbuf");
+        int m = 0, buf_ok = 0;
+        while (getline(&line, &cap, g) > 0) {
+            ambe_unvoiced_state u;
+            int16_t want[256], got[256];
+            char *p = line;
+            int k, bad;
+            if (line[0] == '#')
+                continue;
+            for (k = 0; k < STLEN; k++) u.s[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 256; k++) want[k] = (int16_t)strtol(p, &p, 10);
+            ambe_unvoiced_window(got, &u, NS, 8);
+            for (bad = 0, k = 0; k < 256; k++)
+                if (got[k] != want[k]) {
+                    CHECK(0, "buffer %d sample %d: %d, firmware %d\n", m, k,
+                          (int)got[k], (int)want[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                buf_ok++;
+            m++;
+        }
+        fclose(g);
+        CHECK(m > 80, "only %d buffers in the fixture\n", m);
+        CHECK(buf_ok == m, "windowed buffer exact on %d of %d\n", buf_ok, m);
+        printf("[%d firmware calls, %d generated values, and %d windowed "
+               "buffers of 256: all bit-exact] ", n, n * NS, m);
+    }
+    free(line);
+    return t_done("the unvoiced noise source and its window vs the firmware");
 }

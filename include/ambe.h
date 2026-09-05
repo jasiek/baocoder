@@ -202,6 +202,9 @@ int ambe_harmonic_count(int32_t f0_q19);
 typedef struct { int16_t s[AMBE_UNVOICED_STATE]; } ambe_unvoiced_state;
 void ambe_unvoiced_reset(ambe_unvoiced_state *u);
 void ambe_unvoiced_advance_noise(ambe_unvoiced_state *u, int n);
+extern const int16_t ambe_uv_window_q15[81];
+void ambe_unvoiced_window(int16_t *buf, ambe_unvoiced_state *u, int n,
+                          int size_bits);
 
 typedef struct { int32_t s[6]; } ambe_postfilter_state;
 void ambe_postfilter_reset(ambe_postfilter_state *f);

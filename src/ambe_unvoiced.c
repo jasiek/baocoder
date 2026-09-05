@@ -29,6 +29,23 @@
  */
 #include "ambe.h"
 
+/*
+ * The unvoiced synthesis window, 81 entries at SRAM 0x18003584 (file 0x66c44).
+ * It is 32767*sqrt(k/80) to within one LSB, but the exact int16s are what the
+ * firmware multiplies by, so those are what ship.
+ */
+const int16_t ambe_uv_window_q15[81] = {
+         0,   3664,   5181,   6345,   7327,   8192,   8974,   9693,  10362,  10991,
+     11585,  12151,  12691,  13209,  13708,  14189,  14654,  15105,  15543,  15969,
+     16384,  16789,  17184,  17570,  17948,  18318,  18681,  19037,  19386,  19729,
+     20066,  20398,  20724,  21046,  21362,  21674,  21981,  22285,  22584,  22879,
+     23170,  23458,  23743,  24024,  24301,  24576,  24848,  25116,  25382,  25645,
+     25905,  26163,  26418,  26671,  26922,  27170,  27416,  27659,  27901,  28140,
+     28378,  28613,  28847,  29079,  29309,  29537,  29763,  29988,  30211,  30432,
+     30652,  30870,  31086,  31302,  31515,  31727,  31938,  32148,  32356,  32563,
+     32767,
+};
+
 #define LCG_MUL  0xAD
 #define LCG_ADD  0x3619
 #define HIST_END 0x54
@@ -57,4 +74,34 @@ void ambe_unvoiced_advance_noise(ambe_unvoiced_state *u, int n)
         u->s[i + 1] = x;
     }
     u->s[0] = x;
+}
+
+/*
+ * The 2n-sample windowed noise segment, zero-padded to the transform length.
+ *
+ * The rising half is windowed against the history BEFORE the generator is
+ * advanced and the falling half against it after, with the window index
+ * reversed - so one square-root window is used in both directions and the two
+ * halves overlap-add cleanly across the frame boundary.  The order matters:
+ * calling this after advancing the noise gives a buffer that is wrong in its
+ * first half only, which is easy to miss.
+ *
+ * `buf` receives `1 << size_bits` shorts; the tail beyond 2n is zeroed.
+ */
+void ambe_unvoiced_window(int16_t *buf, ambe_unvoiced_state *u, int n,
+                          int size_bits)
+{
+    int len = 1 << size_bits;
+    int i;
+
+    for (i = 0; i < n; i++)
+        buf[i] = (int16_t)(((int32_t)ambe_uv_window_q15[i] * u->s[i + 1]) >> 15);
+
+    ambe_unvoiced_advance_noise(u, n);
+
+    for (i = 0; i < n; i++)
+        buf[n + i] = (int16_t)(((int32_t)ambe_uv_window_q15[n - i] * u->s[i + 1]) >> 15);
+
+    for (i = 2 * n; i < len; i++)
+        buf[i] = 0;
 }
