@@ -15,14 +15,18 @@
  * not the first.
  *
  *   Vocoder_ComputeHarmonicGains        0x0001D71C   here
+ *   Vocoder_SynthesizeHarmonicSpectrum  0x0001D4C8   here
  *   Vocoder_InterpolateSpectralEnvelope 0x0001D9F0   not yet
- *   Vocoder_SynthesizeHarmonicSpectrum  0x0001D4C8   not yet
  *   Vocoder_SynthesizeVoiced            0x0001DE10   not yet
  *
  * SPDX-License-Identifier: ISC
  */
+#include <string.h>
+
 #include "ambe.h"
 #include "ambe_basop.h"
+#include "ambe_fft.h"
+#include "ambe_tables.h"
 #include "ambe_voiced_int.h"
 
 /*
@@ -196,4 +200,128 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
         gain[k - 1]  = g;
         index[k - 1] = (uint16_t)(int16_t)e1;
     }
+}
+
+/*
+ * Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8, whole.
+ *
+ * This is where the radio's voiced synthesis actually happens, and where it
+ * parts company with ambe_synth.c for good: one complex bin per voiced
+ * harmonic, amplitude and phase, then a single 256-point inverse transform.
+ * ambe_synth.c sums sinusoids in the time domain instead.  The transform is
+ * Dsp_FftInverse 0x00025704, which this library already has bit-exact
+ * (tests/test_fft_firmware.c, 93 of 93), so this function is the bookkeeping
+ * around it rather than a second numerical problem.
+ *
+ * Harmonic p writes bin p+1: bin 0 is DC and the stock code never touches it.
+ * The buffer is 0x100 shorts seen as 128 complex words, plus one more short -
+ * `pDest[0x100] = *pDest` wraps the first sample to the end for the overlap-add
+ * above, which is why the state block has 0x101 shorts of room there.
+ *
+ * Three things in it are quirks rather than arithmetic, and all three matter:
+ *
+ *   The block-float exponent comes from the LARGEST amplitude over the voiced
+ *   harmonics only, found in a first pass, so an unvoiced harmonic with a big
+ *   amplitude does not cost the voiced ones their headroom.
+ *
+ *   The phase is folded to its magnitude before the table lookup and the sine
+ *   is taken as cos(|phase| + 3/4 turn).  cos is even so the real part does not
+ *   care, but the imaginary part does: a negative phase gets sin(|phase|), not
+ *   -sin(|phase|).  The stock code drops that sign and this reproduces it.
+ *
+ *   Two phases saturate rather than fold - 0x80000000 exactly, at two different
+ *   points - and land on table entries 0x1FF and 0x17F.  Both are unreachable
+ *   and are transcribed anyway.  The value tested is a short shifted left ten,
+ *   so it spans [-0x2000000, 0x1FFFC00] and cannot be 0x80000000; the second
+ *   tests bits 31..16 of `v * -0x400`, which over the same range cannot be
+ *   either.  A sweep says the same thing the weaker way: mutating both branches
+ *   away changes nothing on 417 cases.
+ *
+ * Returns the number of bins written; zero means the caller gets silence, and
+ * then the exponent written back is -0x20 rather than the computed one.
+ */
+short ambe_voiced_harmonic_spectrum(int32_t *fft, int16_t *exp_out,
+                                    int16_t step, const uint16_t *phase,
+                                    const int16_t *voiced,
+                                    const uint16_t *amp, int16_t exp_bias,
+                                    int end, int start, int16_t mark)
+{
+    int16_t *dest = (int16_t *)fft;      /* 0x100 shorts as 128 complex bins */
+    int32_t peak = 0;
+    int16_t e;
+    int shift, p, written = 0;
+
+    if (start >= end) {
+        memset(dest, 0, 0x100 * sizeof(int16_t));
+        *exp_out = -0x20;
+        dest[0x100] = dest[0];
+        return 0;
+    }
+
+    /* pass one: the largest amplitude among the voiced harmonics */
+    for (p = start; p < end; p++)
+        if (voiced[p] == mark && peak < (int32_t)((uint32_t)amp[p] << 16))
+            peak = (int32_t)((uint32_t)amp[p] << 16);
+
+    shift = peak ? 1 - (int)ambe_lzcount32((uint32_t)peak) : 0;
+    memset(dest, 0, 0x100 * sizeof(int16_t));
+
+    for (p = start; p < end; p++) {
+        uint32_t acc, ic, is;
+        int32_t v, re, im;
+        int bin = p + 1;
+
+        if (voiced[p] != mark)
+            continue;
+
+        /* the phase this bin is at, as a signed 16-bit count of turns */
+        acc = (uint32_t)(((int32_t)((uint32_t)phase[p] << 16) >> 6) + 0x8000
+                         + bin * (int32_t)step * 0x400);
+        /* a multiply by 64 that keeps the sign bit where it is */
+        v = (int16_t)(((acc & 0x80000000u) + ((acc * 0x40) & 0x7FFFFFFFu)) >> 16);
+
+        ic = (uint32_t)ambe_shl32(v, 10);
+        if ((int32_t)ic < 0) {
+            if (ic == 0x80000000u) {
+                ic = 0x80010000u;
+            } else {
+                ic = (uint32_t)(v * -0x400) & 0xFFFF0000u;
+                if (ic == 0x80000000u) {
+                    ic = 0x1FF;              /* both saturate rather than fold */
+                    is = 0x17F;
+                    goto lookup;
+                }
+                ic = (uint32_t)(-(int32_t)ic);
+            }
+        }
+        ic = (ic & 0x1FFFFFFu) >> 16;
+        is = ((ic * 0x10000u + 0x1800000u) & 0x1FFFFFFu) >> 16;
+lookup:
+        /* cos(|phase|) and cos(|phase| + 3/4 turn), which is sin(|phase|) */
+        re = (int32_t)ambe_cos512_q15[ic] * (int16_t)amp[p] * 2;
+        im = (int32_t)ambe_cos512_q15[is] * (int16_t)amp[p] * 2;
+        /* `shift` is 1 - ff1(peak) over a positive peak, so it lands in
+           [-30, 0] and neither direction can reach 32 - lsl_hw's masking is
+           belt and braces here, unlike in ambe_basop.c where it decides
+           answers.  Mutating it to a plain shift changes nothing on 417 cases. */
+        if (-shift < 0) {
+            dest[bin * 2]     = (int16_t)((uint32_t)(re >> (shift & 0x3f)) >> 16);
+            dest[bin * 2 + 1] = (int16_t)((uint32_t)(im >> (shift & 0x3f)) >> 16);
+        } else {
+            dest[bin * 2]     = (int16_t)((uint32_t)lsl_hw(re, -shift) >> 16);
+            dest[bin * 2 + 1] = (int16_t)((uint32_t)lsl_hw(im, -shift) >> 16);
+        }
+        written++;
+    }
+
+    e = (int16_t)(shift + exp_bias + 0x17);
+    *exp_out = e;
+    if (written == 0) {
+        *exp_out = -0x20;
+        dest[0x100] = dest[0];
+        return 0;
+    }
+    *exp_out = ambe_fft_inverse(fft, e, 8, 0);
+    dest[0x100] = dest[0];
+    return (short)written;
 }

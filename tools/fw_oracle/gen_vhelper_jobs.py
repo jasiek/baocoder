@@ -36,9 +36,21 @@ sys.path.insert(0, os.path.join(REVENG, "tools", "emu"))
 import emu
 
 GAINS = 0x0001D71C
+SPEC  = 0x0001D4C8
 OUT_G = 0x00051000        # 0x38 ushort
 OUT_I = 0x00051100        # 0x38 ushort
 NMAX  = 0x38
+
+# Vocoder_SynthesizeHarmonicSpectrum's five buffers.  The destination is 0x100
+# shorts seen as 128 complex bins plus one more for the wrap sample the stock
+# code writes at pDest[0x100], so it is given 0x102 shorts of room and the short
+# after it is checked for having stayed 0xEEEE.
+S_DEST  = 0x00051200      # 0x102 shorts
+S_EXP   = 0x00051500      # one short, written through param_2
+S_PHASE = 0x00051600      # NMAX ushort
+S_VOICE = 0x00051700      # NMAX short
+S_AMP   = 0x00051800      # NMAX ushort
+NDEST   = 0x102
 
 
 def _cases():
@@ -69,6 +81,67 @@ def _cases():
     return out
 
 
+def _spec_cases():
+    """(step, exp_bias, end, start, mark, phase[], voiced[], amp[]).
+
+    The shape of a real frame first - a run of voiced harmonics with amplitudes
+    that fall away, phases walking with the pitch - and then the cases the stock
+    code branches on: no voiced harmonic at all, which is the -0x20 exponent
+    path; start >= end, which returns before it looks at anything; a single
+    harmonic; and amplitudes large enough that the block-float shift goes
+    negative.
+
+    The two saturating phases are not reachable by choosing arguments here -
+    they need an exact 0x80000000 out of the phase accumulator - so they are
+    swept for rather than constructed: the deterministic sweep runs the step and
+    the phases over their whole range, and the export reports how many of the
+    1600 cases wrote no bin, which is the closest observable.
+    """
+    out = []
+    x = 55555
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    def frame(L, mark, step, bias, start=0, all_voiced=True):
+        ph = [rnd(0x10000) for _ in range(NMAX)]
+        vo = [(mark if (all_voiced or rnd(3)) else 0) for _ in range(NMAX)]
+        am = [max(0, 0x4000 - i * 0x100 + rnd(0x400)) for i in range(NMAX)]
+        return (step, bias, L, start, mark, ph, vo, am)
+
+    for L in (1, 2, 8, 16, 32, 56):
+        for step in (0, 1, -1, 0x100, -0x100, 0x1079, 0x4027, 0x7FFF, -0x8000):
+            out.append(frame(L, 2, step, 0))
+    for bias in (0, 1, -1, 16, -16, 0x100):
+        out.append(frame(16, 2, 0x1079, bias))
+    # the branches: nothing voiced, an empty range, one harmonic, a mark that
+    # is not 2 - the caller passes 2, but the flag array holds other values
+    z = frame(16, 2, 0x1079, 0)
+    out.append((z[0], z[1], z[2], z[3], 2, z[5], [0] * NMAX, z[7]))
+    out.append((z[0], z[1], 4, 4, 2, z[5], z[6], z[7]))
+    out.append((z[0], z[1], 4, 9, 2, z[5], z[6], z[7]))
+    out.append((z[0], z[1], 1, 0, 2, z[5], z[6], z[7]))
+    out.append((z[0], z[1], 16, 0, 1, z[5], [1] * NMAX, z[7]))
+    # amplitudes at the top of the range, where the shift goes negative
+    out.append((0x1079, 0, 16, 0, 2, z[5], z[6], [0x7FFF] * NMAX))
+    out.append((0x1079, 0, 16, 0, 2, z[5], z[6], [1] * NMAX))
+    # 350, not the 1400 the gain sweep uses: every record here carries the whole
+    # 0x102-short destination buffer, so the fixture is 7 KB a case rather than
+    # 250 bytes.  The structured cases above are what reach the branches; the
+    # random ones are there to catch a phase or an amplitude the structure
+    # missed, and 350 of those is 900 KB rather than 3.5 MB.
+    for _ in range(350):
+        L = 1 + rnd(NMAX)
+        start = rnd(L)
+        out.append((rnd(0x10000) - 0x8000, rnd(41) - 20, L, start, 2,
+                    [rnd(0x10000) for _ in range(NMAX)],
+                    [(2 if rnd(4) else 0) for _ in range(NMAX)],
+                    [rnd(0x8000) for _ in range(NMAX)]))
+    return out
+
+
 def gen(jobfile):
     cases = _cases()
     j = emu.Job()
@@ -79,8 +152,21 @@ def gen(jobfile):
                delta & 0xFFFFFFFF, n & 0xFFFFFFFF, L & 0xFFFFFFFF)
         j.peek("g%d" % i, OUT_G, NMAX * 2)
         j.peek("x%d" % i, OUT_I, NMAX * 2)
+    for i, (step, bias, end, start, mark, ph, vo, am) in enumerate(_spec_cases()):
+        j.poke(S_DEST,  b"\xEE" * (NDEST * 2))
+        j.poke(S_EXP,   b"\xEE\xEE")
+        j.poke(S_PHASE, struct.pack("<%dH" % NMAX, *ph))
+        j.poke(S_VOICE, struct.pack("<%dh" % NMAX, *vo))
+        j.poke(S_AMP,   struct.pack("<%dH" % NMAX, *am))
+        j.call(SPEC, S_DEST, S_EXP, step & 0xFFFFFFFF, S_PHASE, S_VOICE, S_AMP,
+               bias & 0xFFFFFFFF, end & 0xFFFFFFFF, start & 0xFFFFFFFF,
+               mark & 0xFFFFFFFF)
+        j.getreg("r0")
+        j.peek("sd%d" % i, S_DEST, NDEST * 2)
+        j.peek("se%d" % i, S_EXP, 2)
     j.write(jobfile)
-    print("wrote %s: %d cases" % (jobfile, len(cases)))
+    print("wrote %s: %d gain cases, %d spectrum cases"
+          % (jobfile, len(cases), len(_spec_cases())))
     return len(cases)
 
 
@@ -106,7 +192,11 @@ def export(outfile, dest):
             ok.append(True)
         elif line.startswith("FAULT "):
             ok.append(False)
-    assert len(ok) == len(cases), "%d outcomes for %d cases" % (len(ok), len(cases))
+    # the job runs the gain cases first, then the spectrum ones
+    assert len(ok) == len(cases) + len(_spec_cases()), (
+        "%d outcomes for %d + %d calls" % (len(ok), len(cases), len(_spec_cases())))
+    spec_ok = ok[len(cases):]
+    assert all(spec_ok), "%d spectrum calls faulted" % spec_ok.count(False)
     n = skipped = 0
     with open(dest, "w") as fh:
         fh.write("# Vocoder_ComputeHarmonicGains 0x0001D71C, called directly under the\n"
@@ -128,6 +218,30 @@ def export(outfile, dest):
                 " ".join(map(str, g[:L])), " ".join(map(str, x[:L]))))
             n += 1
     print("%s: %d cases, %d excluded because the divide traps" % (dest, n, skipped))
+
+    r0 = [v for nm, v in res["regs"] if nm == "r0"]
+    sdest = dest.replace("gains", "spectrum")
+    with open(sdest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8, called directly\n"
+                 "# under the p-code emulator.  tools/fw_oracle/gen_vhelper_jobs.py.\n"
+                 "# per record: step expBias end start mark, %d phases, %d voicing\n"
+                 "#   flags, %d amplitudes, then the bins written back - %d shorts,\n"
+                 "#   which is 128 complex bins and the wrap sample at [0x100] - the\n"
+                 "#   exponent written through param_2, and the return value.\n"
+                 "# The destination is poked 0xEEEE first, so a short the firmware did\n"
+                 "# not write is visible rather than passing as a zero.\n"
+                 % (NMAX, NMAX, NMAX, NDEST))
+        m = 0
+        for i, (step, bias, end, start, mark, ph, vo, am) in enumerate(_spec_cases()):
+            d = struct.unpack("<%dh" % NDEST, res["peek"]["sd%d" % i][0])
+            e = struct.unpack("<h", res["peek"]["se%d" % i][0])[0]
+            fh.write("%d %d %d %d %d %s %s %s %s %d %d\n" % (
+                step, bias, end, start, mark,
+                " ".join(map(str, ph)), " ".join(map(str, vo)),
+                " ".join(map(str, am)), " ".join(map(str, d)), e,
+                r0[i] - 0x10000 if r0[i] >= 0x8000 else r0[i]))
+            m += 1
+    print("%s: %d spectrum cases" % (sdest, m))
     return n
 
 

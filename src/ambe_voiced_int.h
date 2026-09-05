@@ -17,4 +17,13 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
                                 int16_t prev_pitch, int16_t pitch_delta,
                                 uint16_t n, int L);
 
+/* Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8.  `fft` is 0x100 shorts seen as
+   128 complex bins, with one more short of room after them for the wrap sample
+   the stock code writes at pDest[0x100]. */
+short ambe_voiced_harmonic_spectrum(int32_t *fft, int16_t *exp_out,
+                                    int16_t step, const uint16_t *phase,
+                                    const int16_t *voiced,
+                                    const uint16_t *amp, int16_t exp_bias,
+                                    int end, int start, int16_t mark);
+
 #endif /* AMBE_VOICED_INT_H */
