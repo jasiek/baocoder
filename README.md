@@ -289,7 +289,13 @@ is in the decode path, because the stage that would call them is not written.
   under a generated trapezoid, and says so in its header. That is why
   `test_synth` compares spectra and levels rather than samples: 0.973 mean band
   correlation against the radio's own audio, not equality. Parity holds through
-  the parameters and stops at the audio.
+  the parameters and stops at the audio. The oracle for writing it is here now
+  even though the transcription is not: `tests/fixtures/dm32_arc4_1.fwvoiced`
+  carries all six arguments, the accumulator either side and the channel state
+  either side for **617 calls**, and calling the firmware's own function on
+  those arguments reproduces all 617 exactly - against the neighbouring record,
+  0 of 616. `tools/fw_oracle/README.md` has the method and the three wrong
+  guesses about the arguments that it cost.
 * **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is implemented and exact, but
   unwired** — `src/ambe_blend.c`, bit-exact on pitch, `L` and envelope over
   **232 firmware calls** (`test_blend`). So are `Vocoder_SynthesizeUnvoiced`

@@ -54,6 +54,48 @@ BLK_PARAMS    = 0x00045AA4     # PARAMS+0x000, second half
 BLK_LEN       = 0x100
 RING          = V.TX_CTX + D.PCM_RING
 RING_LEN      = D.PCM_RING_LEN * 2
+# The voiced synthesiser's two remaining arguments.  Nothing between
+# BRK_AFTER_UV 0x00019ED2 and the call at 0x00019EEE writes either of them - the
+# twelve instructions in between are loads, moves and two stack stores, which is
+# the whole reason no new break is needed here.  Adding one would shift the stop
+# sequencing this job's frame feed is keyed to; adding a peek cannot.
+V_STATE       = V.TX_CTX + 0x18    # param_3, pChannelState+0x18
+N_VST         = 0x22C              # shorts, the WHOLE span from pState to PREV.
+                                   # The function's own accesses off r11 stop at
+                                   # byte 0x1ca (short 0xe5) and it hands four
+                                   # pointers to helpers - shorts 0xab, 0xad,
+                                   # 0xe5, 0xe6 - so how far the last array runs
+                                   # is the helpers' business, not visible here.
+                                   # A first attempt at 0x140 guessed 0x38 for
+                                   # it, the length Vocoder_SynthesizeFrame
+                                   # clears at ctx+0x172 (which is pState+0xad).
+                                   # 337 of 617 direct calls then died on a
+                                   # divide by zero at 0x00018F14, and the ones
+                                   # that died were the ones with live data at
+                                   # the edge of the window.  The array at
+                                   # [0xe6] is not 0x38 long: it is the harmonic
+                                   # SPECTRUM, and Vocoder_SynthesizeHarmonicSpectrum
+                                   # 0x0001D4C8 clears it 0x80<<1 = 0x100 shorts
+                                   # at a time before handing it to
+                                   # Dsp_FftInverse 0x00025704, so the state runs
+                                   # to at least 0xe6+0x100 = 0x1e6.  0x22C
+                                   # reaches the next structure the memory map
+                                   # knows about and ends the guessing.
+PREV          = V.TX_CTX + 0x470   # param_5, the previous frame's parameters:
+                                   # `addi r0,r6,0x470 / st.w r0,(sp,0x8)` at
+                                   # 0x00019DC6, reloaded into r13 at 0x00019ED6
+# The per-harmonic voicing flags.  pParams[0x40..0x41] is a POINTER to them and
+# both synthesisers dereference it, so a fixture that omits the array is not a
+# complete set of inputs.  They are NOT in the channel state: measured over 345
+# captured calls the pointer holds exactly one value from the current block,
+# 0x00057D70, and exactly one from the previous, 0x00057D00 - two adjacent
+# scratch arrays 0x70 bytes apart, which is 0x38 shorts, which is the harmonic
+# maximum and the length Vocoder_BuildFrameResetPattern fills.  One peek covers
+# both; export_voiced locates the current frame's within it from the pointer
+# rather than trusting the constant.
+VOI           = 0x00057D00
+N_VOI         = 0x38               # shorts per array
+VOI_LEN       = N_VOI * 2 * 2      # both arrays
 
 
 def gen(jobfile, framesfile, nframes):
@@ -89,6 +131,11 @@ def gen(jobfile, framesfile, nframes):
         j.peek("uvs%d" % w, V.TX_CTX + 0x648, 0x160)
         # the smoothed pitch it is passed, and the block it reads
         j.peek("pit%d" % w, V.TX_CTX + 0x7be, 2)
+        # the voiced synthesiser's state, param_3 = pChannelState+0x18, and the
+        # previous frame's parameter block it is handed as param_5
+        j.peek("vst%d" % w, V_STATE, N_VST * 2)
+        j.peek("prv%d" % w, PREV, BLK_LEN)
+        j.peek("voi%d" % w, VOI, VOI_LEN)
     j.write(jobfile)
     print("wrote %s: %d stops" % (jobfile, nframes * D.WAKES_PER_FRAME * 6))
 
@@ -257,4 +304,87 @@ def export_unvoiced(outfile, dest):
                 " ".join(map(str, st1))))
             n += 1
     print("%s: %d unvoiced calls" % (dest, n))
+    return n
+
+
+def export_voiced(outfile, dest):
+    """Write Vocoder_SynthesizeVoiced's six arguments, output and state per call.
+
+    Unlike the unvoiced call the accumulator is NOT zero here - the unvoiced
+    contribution is already in it - so the record carries the accumulator on
+    both sides rather than only after.  The function adds into it
+    (`acc[i] = (buf[i] + acc[i]) - ramp*buf[i]`, and the subtracted term depends
+    only on its own buffer), so the voiced contribution is separable by
+    subtraction; it is recorded unseparated because a fixture should be what the
+    machine held.
+
+    Everything is read at BRK_AFTER_UV, twelve instructions before the call.
+    That is deliberate: `ld.h r12,(r6,0x7be) / ld.w r13,(sp,0x8) / sexth /
+    mov r0,r5 / mov r1,r7 / addi r2,r6,0x18 / mov r3,r4 / st.w r13,(sp,0x0) /
+    st.w r12,(sp,0x4)` is the whole of it, and none of it writes the state, the
+    blocks or the pitch.  So the inputs are complete there, and no break has to
+    be added at 0x00019EEE itself - which matters, because this job's frame feed
+    is keyed to the number of stops per wake.
+
+    r3 is not read back for the block source: it is caller-saved and the
+    unvoiced call has just clobbered it.  The enclosing BRK_SYNTH_IN stop's r0
+    is what says which block, the same walk-back export_postfilter does.
+    """
+    stops, cur = [], None
+    for line in open(outfile):
+        line = line.strip()
+        if line.startswith("BREAK "):
+            cur = {"pc": int(line.split()[1], 16), "p": {}, "r": {}}
+            stops.append(cur)
+        elif line.startswith("PEEK ") and cur is not None:
+            _, n, h = line.split()
+            cur["p"][n.rstrip("0123456789")] = bytes.fromhex(h)
+        elif line.startswith("REG ") and cur is not None:
+            _, n, h = line.split()
+            cur["r"][n] = int(h, 16)
+
+    n = 0
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeVoiced 0x0001DE10, every call over the capture.\n"
+                 "# Vocoder_SynthesizeFrame hands it (acc, n, pChannelState+0x18,\n"
+                 "#   pParams, pPrevParams, nPitch) - r0..r3 and two stack slots.\n"
+                 "# per record: pitch, %d shorts of the current parameter block as the\n"
+                 "#   call sees it, %d shorts of the previous block (ctx+0x470), %d\n"
+                 "#   shorts of state before, the %d per-harmonic voicing flags\n"
+                 "#   pParams[0x40] points at, the %d int32 accumulator before (the\n"
+                 "#   unvoiced contribution) and after, then %d shorts of state after\n"
+                 % (68, 68, N_VST, N_VOI, 80, N_VST))
+        for i, s in enumerate(stops):
+            if s["pc"] != BRK_AFTER_UV:
+                continue
+            j = i + 1
+            while j < len(stops) and stops[j]["pc"] != BRK_AFTER_V:
+                j += 1
+            if j >= len(stops):
+                break
+            k = i - 1
+            while k >= 0 and stops[k]["pc"] != BRK_SYNTH_IN:
+                k -= 1
+            if k < 0:
+                break
+            blk = s["p"]["bi" if stops[k]["r"]["r0"] == BLK_INTERP else "bp"]
+            # where the block says its voicing flags are, not where they were
+            # last time: an address that has moved outside the peeked window is
+            # a fixture with a hole in it, so stop rather than slice blindly
+            ptr = struct.unpack_from("<I", blk, 0x80)[0]
+            off = ptr - VOI
+            assert 0 <= off and off + N_VOI * 2 <= VOI_LEN, (
+                "pParams[0x40] is %08x, outside the %d bytes peeked at %08x"
+                % (ptr, VOI_LEN, VOI))
+            fh.write("%d %s %s %s %s %s %s %s\n" % (
+                struct.unpack("<h", s["p"]["pit"])[0],
+                " ".join(map(str, struct.unpack_from("<68h", blk, 0))),
+                " ".join(map(str, struct.unpack_from("<68h", s["p"]["prv"], 0))),
+                " ".join(map(str, struct.unpack_from("<%dh" % N_VST, s["p"]["vst"], 0))),
+                " ".join(map(str, struct.unpack_from("<%dH" % N_VOI, s["p"]["voi"], off))),
+                " ".join(map(str, struct.unpack_from("<80i", s["p"]["acc"], 0))),
+                " ".join(map(str, struct.unpack_from("<80i", stops[j]["p"]["acc"], 0))),
+                " ".join(map(str, struct.unpack_from("<%dh" % N_VST, stops[j]["p"]["vst"], 0)))))
+            n += 1
+    print("%s: %d voiced calls" % (dest, n))
     return n

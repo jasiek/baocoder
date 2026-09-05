@@ -110,6 +110,90 @@ the firmware's.
 At each wake it peeks the payload buffer, the ring, and the parameter block at
 `pCtx+1000`, whose layout is `Vocoder_CopyFrameParamsWithReset 0x00019CBC`'s.
 
+## The voiced synthesiser
+
+`Vocoder_SynthesizeVoiced 0x0001DE10` is the one stage of the codec with no
+transcription, and `tests/fixtures/dm32_arc4_1.fwvoiced` is the oracle for
+writing one: 617 calls, every one the task run made over
+`tests/fixtures/dm32_arc4_1.frames`, with all six arguments, the accumulator on
+both sides and the channel state before and after.
+
+```sh
+# the inputs, from the sequence capture (about ten minutes)
+python3 tools/fw_oracle/gen_synth_jobs.py /tmp/synth.job /tmp/dm32_arc4_1.frames 360
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/synth.job /tmp/synth.out
+python3 -c "import sys; sys.path.insert(0,'tools/fw_oracle'); import gen_synth_jobs as G; \
+            G.export_voiced('/tmp/synth.out','tests/fixtures/dm32_arc4_1.fwvoiced')"
+
+# the audit: call the function directly on those inputs (about a minute)
+python3 tools/fw_oracle/gen_v_jobs.py /tmp/v.job tests/fixtures/dm32_arc4_1.fwvoiced
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/v.job /tmp/v.out
+python3 tools/fw_oracle/gen_v_jobs.py --audit /tmp/v.out tests/fixtures/dm32_arc4_1.fwvoiced 0
+python3 tools/fw_oracle/gen_v_jobs.py --audit /tmp/v.out tests/fixtures/dm32_arc4_1.fwvoiced 1
+```
+
+| audit | accumulator | state |
+|---|--:|--:|
+| record *i*'s arguments against record *i*'s answer | **617 / 617** | **617 / 617** |
+| against record *i+1*'s | 0 / 616 | 0 / 616 |
+| against record *i+2*'s | 0 / 615 | 0 / 615 |
+
+The second line is the point. The first would pass on a capture that had paired
+state with the wrong frame from the beginning; the second says the pairing
+carries information, the same check that established the unvoiced capture.
+
+### Three things the arguments cost to get right, and all three failed loudly
+
+**The state does not end where its named fields do.** The function's own loads
+off `r11` stop at byte `0x1ca`, and it hands helpers pointers at shorts `0xab`,
+`0xad`, `0xe5` and `0xe6`. A first window of `0x140` shorts was sized on the
+assumption that `[0xe6]` was another `0x38`-long array like `[0xad]` - which is
+what `Vocoder_SynthesizeFrame` clears at ctx+0x172, and ctx+0x172 *is*
+pState+0xad, so the reasoning looked closed. It is not: `[0xe6]` is the harmonic
+spectrum, `Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8` clears it `0x80<<1`
+shorts at a time before handing it to `Dsp_FftInverse`, so the state runs to at
+least `0xe6+0x100 = 0x1e6`. The window is now the whole span to the next
+structure the map knows about, `0x22C` shorts.
+
+**The voicing flags are not in the state either.** `pParams[0x40..0x41]` points
+at them and the spectrum builder dereferences them. Measured across the capture
+the pointer holds exactly one value from the current block, `0x00057D70`, and
+one from the previous, `0x00057D00` - two adjacent scratch arrays `0x70` bytes
+apart, which is the `0x38` shorts `Vocoder_BuildFrameResetPattern` fills. They
+are captured and repointed at the poked copy, and the pointer is checked to lie
+inside the peeked window rather than assumed to be that constant.
+
+**Truncated state and overlapping scratch fail identically.** Both produced 337
+faults out of 617, every one a divide by zero at `0x00018F14` - a zero divisor
+reached through `Vocoder_InterpolateSpectralEnvelope`. The first was the state
+window ending inside the spectrum buffer; the second was a scratch layout on
+`0x100` boundaries that, once the window grew to `0x458` bytes, had the state
+overlapping the parameter block poked after it. Same symptom, same count,
+different cause. The addresses are now derived from the sizes, so a size that
+changes again cannot silently re-create it.
+
+### No stage breaks, and why
+
+The unvoiced job breaks twice inside the call so a failure lands on a stage. The
+two equivalent boundaries here - `0x0001DFAE`, the clear between the previous
+frame's harmonics and this frame's, and `0x0001E166`, the history store - are
+both on branches. Over 20 probe records the first fired 20 times and the second
+14: the function has two epilogues, `0x0001E180` and `0x0001E304`, and a branch
+at `0x0001DF38` that leaves for `0x0001E462`, past the clear. A job file is a
+linear script: a break that does not fire leaves its `resume` to run a machine
+that has already returned, and every peek after it belongs to the wrong record.
+`--stages` still works on a subset known to take the main path; it is not what
+establishes the fixture.
+
+### One peek, no new break
+
+Everything the voiced call is handed is read at `BRK_AFTER_UV 0x00019ED2`,
+twelve instructions before the call, because those twelve are loads, moves and
+two stack stores and none of them writes the state, the blocks or the pitch.
+That matters more than it looks: `gen_synth_jobs.py`'s frame feed is keyed to
+the number of stops per wake, so a new break would have shifted the sequencing
+of a job three other fixtures come out of. A peek cannot.
+
 ## Breaking inside the interpolator
 
 `resample_probe.py` is a different kind of job: it stops the emulator *inside*
