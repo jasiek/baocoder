@@ -215,7 +215,16 @@ static short bitrev_scale(int32_t *buf, short scale_exp, int order)
                     int32_t e = re * re + im * im;
                     if (p2 < e) p2 = e;
                 }
-                head = (short)(ambe_lzcount32((uint32_t)p2) - 2u);
+                /*
+                 * The rescan yields the leading-zero count itself; the -2 is
+                 * applied once, below, on both paths.  Subtracting it here as
+                 * well - which this did - leaves `head` two too low on every
+                 * rescanned stage, pushing the loop into the shifting
+                 * butterfly and scaling the spectrum down by an extra step.
+                 * Measured against Dsp_FftForward executed over 93 real
+                 * buffers, that was wrong on all of them.
+                 */
+                head = (short)ambe_lzcount32((uint32_t)p2);
             }
             head = (short)(head - 2);
             stride *= 2;
