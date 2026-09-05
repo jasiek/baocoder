@@ -39,6 +39,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis; firmware `Vocoder_SynthesizeFrame` `0x00019DB8`, `Vocoder_SynthesizeVoiced/Unvoiced` `0x0001DE10` / `0x0001AFE0` |
 | Windowed FFT (PCM -> spectrum) | `src/ambe_fft.c` | firmware `Dsp_WindowAndComputeFft` `0x00019B6C`, `Dsp_FftForward` `0x000256D0`, `Dsp_FftBitReverseScale` `0x00025224`, the two butterfly kernels `0x00025160` / `0x0002509C` |
+| Unvoiced excitation | `src/ambe_unvoiced.c` | **transcribed and bit-exact**: firmware `Vocoder_SynthesizeUnvoiced` `0x0001AFE0`, `Vocoder_BuildFrameResetPattern` `0x00022CD0`, `FUN_0001abdc` |
 | Fixed-point primitives (log2, pow2, sqrt, cos, divide) | `src/ambe_basop.c` | firmware `Math_Log2` `0x0001903C`, `Math_Pow2` `0x000191C0`, `Math_Sqrt` `0x00019364`, `Math_TableInterpLookup` `0x00019000`, `Math_SDiv` `0x00018D74` |
 | Quantiser codebooks, voicing patterns, block lengths, and the primitives' coefficients | `src/ambe_tables_fw.c` | **extracted from the firmware image** by `tools/extract_tables.py` |
 | Pitch and harmonic count | `ambe_pitch_from_b0` in `src/ambe_params.c` | **the firmware's own closed-form law**, constants read from the image |

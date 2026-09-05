@@ -30,6 +30,49 @@ done
 python3 tools/fw_oracle/export.py /tmp tests/fixtures
 ```
 
+## The sleigh has to be patched first
+
+`docs/patches/csky-mvcv.patch` corrects the 16-bit `mvcv` constructor, which
+produced 0xFE/0xFF instead of 0/1 and so made every branch on a condition the
+compiler had moved into a register go the same way. It is not optional: without
+it `Vocoder_SynthesizeUnvoiced` takes the wrong one of its two gain paths on
+every frame.
+
+Regenerating `tests/fixtures/dm32_arc4_1.frames` with and without it says which
+fixtures the defect touched. `.fwparms`, `.fwenv` and `.fwamps` come out
+**identical** - the parameter path never used it. `.fwpcm` does not: 31.4% of
+57 600 samples differ, worst 57 LSB against a 1 984 peak, 35.0 dB SNR.
+
+`*.fwunvoiced` is regenerated. **`*.fwpcm` and everything derived from it -
+`*.fwencbits`, `*.fwanalysis`, `*.fwsynth`, `*.fwpostfilter`, `*.fwifft` - still
+predate the fix.** Those drive tolerance tests rather than bit-exactness
+assertions, so they are stale rather than wrong-and-failing, but the
+regeneration is outstanding work and the encoder fixtures have to be re-run
+*after* the PCM they take as input, not alongside it.
+
+## Calling one function instead of watching it
+
+`gen_uv_jobs.py` is a different shape of job again: it pokes the arguments of
+`Vocoder_SynthesizeUnvoiced 0x0001AFE0` into scratch and calls it, one case per
+record, instead of catching it inside a running task. That is only possible
+once the *inputs* are known - they are channel state, and `gen_synth_jobs.py`'s
+sequence capture is what learns them - but once they are, it is better in three
+ways: a record cannot pair one call's state with another call's parameter
+block, 103 calls take 27 seconds rather than ten minutes, and the inputs can be
+varied, which is the only way to reach the frame-class-2 gain path this corpus
+never contains.
+
+```sh
+python3 tools/fw_oracle/gen_uv_jobs.py /tmp/uv.job
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/uv.job /tmp/uv.out
+python3 tools/fw_oracle/gen_uv_jobs.py --export /tmp/uv.out \
+        tests/fixtures/dm32_arc4_1.fwunvoiced
+```
+
+The job breaks twice inside each call, at the two transforms, so the fixture
+carries the windowed noise going in and the shaped spectrum coming out as well
+as the samples - a failure lands on a stage rather than on 713 instructions.
+
 ## What the job does
 
 `gen_jobs.py` drives `Vocoder_TxTask 0x0002EC30` itself rather than

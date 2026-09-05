@@ -206,6 +206,28 @@ extern const int16_t ambe_uv_window_q15[81];
 void ambe_unvoiced_window(int16_t *buf, ambe_unvoiced_state *u, int n,
                           int size_bits);
 
+/*
+ * One voicing flag per harmonic, Vocoder_BuildFrameResetPattern 0x00022CD0.
+ * `vuv` is the frame's 32-bit voicing word, sixteen 2-bit crumbs least
+ * significant first, one per 250 Hz band.  `out` receives AMBE_UNVOICED_BANDS
+ * entries, zero past L; a non-zero entry means the voiced synthesiser owns
+ * that harmonic and the unvoiced one must leave its band empty.
+ */
+#define AMBE_UNVOICED_BANDS 0x38
+void ambe_unvoiced_voicing(uint16_t *out, uint32_t vuv, int16_t f0_q19, int L);
+
+/*
+ * Vocoder_SynthesizeUnvoiced 0x0001AFE0 in full: `n` samples of shaped noise
+ * added into `acc`.  `cls` is the frame class (2 selects a flat gain instead
+ * of the per-band energy normalisation, 3 is silence), `amps` are the L
+ * spectral amplitudes with the shared exponent `amp_exp` - the firmware's
+ * pFrameParams+0x10 and +0x84 - and `pitch` is the smoothed pitch at Q19,
+ * below which the spectrum is cut.
+ */
+void ambe_unvoiced_synth(int32_t *acc, int n, ambe_unvoiced_state *u,
+                         int cls, int L, int16_t f0_q19, const int16_t *amps,
+                         int amp_exp, const uint16_t *voiced, int16_t pitch);
+
 typedef struct { int32_t s[6]; } ambe_postfilter_state;
 void ambe_postfilter_reset(ambe_postfilter_state *f);
 void ambe_postfilter(ambe_postfilter_state *f, int32_t *acc, int n);
