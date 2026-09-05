@@ -188,6 +188,16 @@ int ambe_harmonic_count(int32_t f0_q19);
  * averaged.  Envelopes here are log2 at Q11, the firmware's own units, not
  * ambe_parms' Q24.
  */
+/*
+ * The output filter the radio runs over synthesised samples, src/ambe_postfilter.c.
+ * Two cascaded second-order sections with six words of state; FUN_00018a2c in
+ * the Ghidra database, which only execution identified.
+ */
+typedef struct { int32_t s[6]; } ambe_postfilter_state;
+void ambe_postfilter_reset(ambe_postfilter_state *f);
+void ambe_postfilter(ambe_postfilter_state *f, int32_t *acc, int n);
+void ambe_synth_output(int16_t *pcm, const int32_t *acc, int n);
+
 int32_t ambe_divide_normalized(int16_t num, int16_t den);
 int32_t ambe_geometric_pitch(int32_t f0_a, int32_t f0_b);
 void ambe_resample_envelope(int16_t *out, int32_t f0_out, int32_t f0_src,
