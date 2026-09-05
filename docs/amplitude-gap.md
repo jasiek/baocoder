@@ -183,6 +183,29 @@ and a defensible one. It is not the radio's. Two differences are structural:
   half uses a pitch and harmonic count belonging to **neither** coded frame. An
   index-matched blend cannot express that at all.
 
+### What it would take, and what does not work
+
+`src/ambe_blend.c` now transcribes the interpolation itself, bit-exact against
+232 firmware calls (`tests/test_blend.c`). Wiring it in is the part that is not
+a small change, and the reason is the window rather than the blend.
+
+`ambe_synth.c`'s `ws_num` is a 321-entry trapezoid indexed by `n` and `n+N` —
+the standard MBE overlap-add spanning two 160-sample frames. Making the hop 80
+samples is not `N = 80`; it is a *different window*, which would be invented
+here rather than transcribed. The radio does not use this mechanism at all: it
+synthesises through an inverse FFT with `Vocoder_ApplySynthesisWindow
+0x00029D1C`. So a faithful two-half implementation means transcribing
+`Vocoder_SynthesizeFrame 0x00019DB8`, not adapting this one.
+
+The cheap substitute was tried and **measured worse**: starting each frame from
+the blend instead of from the previous frame drops the band correlation from
+**0.973 to 0.962**, worst-case 0.805 to 0.638. That is a result about the
+substitution, not about the radio's model — the parameter sequence is
+`[…, prev, mid, cur, mid', cur', …]` at 80-sample intervals, and feeding two of
+those into a 160-sample-hop overlap-add stretches them over twice their
+intended duration. There is no shortcut that preserves both the trajectory and
+the frame-to-frame continuity; it needs the 80-sample-hop synthesiser.
+
 So this is the honest account of the remaining synthesis distance — 0.973 band
 correlation against the radio's own audio, versus mbelib's 0.968 on the same
 reference. Closing it means synthesising in two halves from a resampled
