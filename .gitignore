@@ -12,3 +12,4 @@ tools/dmra_decrypt
 tests/test_*
 !tests/test_*.c
 tools/fw_oracle/bits_to_frames
+__pycache__/
