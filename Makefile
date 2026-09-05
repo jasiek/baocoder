@@ -20,7 +20,7 @@ OBJ     := $(SRC:.c=.o)
 LIB     := libbaocoder.a
 
 TESTS   := tests/test_golay tests/test_aes tests/test_basop tests/test_fft tests/test_tables tests/test_fec \
-           tests/test_firmware tests/test_mbelib tests/test_synth tests/test_e2e \
+           tests/test_firmware tests/test_firmware_encode tests/test_mbelib tests/test_synth tests/test_e2e \
            tests/test_encode tests/test_encode_sweep tests/test_encode_pcm \
            tests/test_encode_voicing tests/test_subband
 
