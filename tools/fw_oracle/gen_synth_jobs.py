@@ -36,6 +36,8 @@ BRK_SYNTH_IN  = 0x00019DB8
 BRK_SYNTH_OUT = 0x00016D5A
 # the three sample-domain stages, snapshotted so each can be transcribed and
 # checked on its own rather than only end to end
+BRK_AT_UV     = 0x00019ECE     # the call itself: the parameter block is fully
+                               # preprocessed here, which it is not at entry
 BRK_AFTER_UV  = 0x00019ED2     # after Vocoder_SynthesizeUnvoiced 0x0001AFE0
 BRK_AFTER_V   = 0x00019EF2     # after Vocoder_SynthesizeVoiced   0x0001DE10
 BRK_AFTER_PF  = 0x00019EFE     # after FUN_00018a2c
@@ -62,13 +64,13 @@ def gen(jobfile, framesfile, nframes):
     j.hook_break(D.BRK_AFTER_PEND)
     j.hook_break(BRK_SYNTH_IN)
     j.hook_break(BRK_SYNTH_OUT)
-    for a in (BRK_AFTER_UV, BRK_AFTER_V, BRK_AFTER_PF):
+    for a in (BRK_AT_UV, BRK_AFTER_UV, BRK_AFTER_V, BRK_AFTER_PF):
         j.hook_break(a)
     j.poke(V.TX_CTX + D.F_GATE, b"\x01")
     j.poke(V.TX_CTX + D.F_MODE, b"\x00" * D.N_MODE)
     j.call(D.TX_TASK, D.SCRATCH_ERR)
-    for w in range(nframes * D.WAKES_PER_FRAME * 5):
-        f = (w // 5) // D.WAKES_PER_FRAME
+    for w in range(nframes * D.WAKES_PER_FRAME * 6):
+        f = (w // 6) // D.WAKES_PER_FRAME
         if f < nframes:
             j.poke(V.TX_CTX + D.F_FILL, struct.pack("<h", D.HALF))
             j.poke(V.TX_CTX + D.F_BURST + (f % 3) * 9, frames[f])
@@ -82,8 +84,13 @@ def gen(jobfile, framesfile, nframes):
         # FUN_00018a2c's six state words live at the very start of the channel
         # context; without them its first output cannot be reproduced
         j.peek("fst%d" % w, V.TX_CTX, 0x18)
+        # the unvoiced synthesiser's own state, param_3 = pChannelState+0x648,
+        # which the code indexes up to [0xa9]
+        j.peek("uvs%d" % w, V.TX_CTX + 0x648, 0x160)
+        # the smoothed pitch it is passed, and the block it reads
+        j.peek("pit%d" % w, V.TX_CTX + 0x7be, 2)
     j.write(jobfile)
-    print("wrote %s: %d stops" % (jobfile, nframes * D.WAKES_PER_FRAME * 5))
+    print("wrote %s: %d stops" % (jobfile, nframes * D.WAKES_PER_FRAME * 6))
 
 
 if __name__ == "__main__":
@@ -195,4 +202,59 @@ def export_postfilter(outfile, dest):
                                         " ".join(map(str, pcm))))
             n += 1
     print("%s: %d filter calls" % (dest, n))
+    return n
+
+
+def export_unvoiced(outfile, dest):
+    """Write Vocoder_SynthesizeUnvoiced's inputs, output and state per call.
+
+    The accumulator is zeroed immediately before this call, so what it leaves
+    there is the unvoiced contribution alone - the function can be checked on
+    its own without disentangling it from the voiced path.
+
+    The parameter block is peeked at 0x00019ECE, the call instruction itself,
+    not at the function's entry: Vocoder_SynthesizeFrame rewrites that block in
+    place on the way down (normalisation, excitation match, the gain ramp), so
+    the version at entry is not the version the synthesiser sees.
+    """
+    stops, cur = [], None
+    for line in open(outfile):
+        line = line.strip()
+        if line.startswith("BREAK "):
+            cur = {"pc": int(line.split()[1], 16), "p": {}, "r": {}}
+            stops.append(cur)
+        elif line.startswith("PEEK ") and cur is not None:
+            _, n, h = line.split()
+            cur["p"][n.rstrip("0123456789")] = bytes.fromhex(h)
+        elif line.startswith("REG ") and cur is not None:
+            _, n, h = line.split()
+            cur["r"][n] = int(h, 16)
+
+    n = 0
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeUnvoiced 0x0001AFE0, every call over the capture.\n"
+                 "# per record: pitch, 68 shorts of the parameter block as the call sees\n"
+                 "#   it, 170 shorts of state (pChannelState+0x648) before, then the 80\n"
+                 "#   int32 samples produced, then 170 shorts of state after\n")
+        for i, s in enumerate(stops):
+            if s["pc"] != BRK_AT_UV:
+                continue
+            j = i + 1
+            while j < len(stops) and stops[j]["pc"] != BRK_AFTER_UV:
+                j += 1
+            if j >= len(stops):
+                break
+            blk = s["p"]["bi" if s["r"].get("r3") == BLK_INTERP else "bp"]
+            pit = struct.unpack("<h", s["p"]["pit"])[0]
+            st0 = struct.unpack_from("<170h", s["p"]["uvs"], 0)
+            st1 = struct.unpack_from("<170h", stops[j]["p"]["uvs"], 0)
+            acc = struct.unpack_from("<80i", stops[j]["p"]["acc"], 0)
+            fh.write("%d %s %s %s %s\n" % (
+                pit,
+                " ".join(map(str, struct.unpack_from("<68h", blk, 0))),
+                " ".join(map(str, st0)),
+                " ".join(map(str, acc)),
+                " ".join(map(str, st1))))
+            n += 1
+    print("%s: %d unvoiced calls" % (dest, n))
     return n
