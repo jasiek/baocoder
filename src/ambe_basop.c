@@ -285,6 +285,140 @@ int ambe_sin_q15(int phase_q15turns)
     return ambe_cos_q15(phase_q15turns - 8192);
 }
 
+/* ------------------------------------------- the radio's own block float */
+
+/*
+ * `asr` and `lsl` with the shift the hardware performs.
+ *
+ * The C-SKY shift instructions take the amount from a register and Ghidra's
+ * p-code masks it to six bits, which is visible all over the decompilation as
+ * `<< (n & 0x3f)`.  That is not academic here: Math_FloatAdd aligns to
+ * max(expA, expB) + 1, and its own guard admits an exponent difference of 31,
+ * so the smaller operand can be shifted by exactly 32 - which C leaves
+ * undefined and the machine renders as "everything shifted out".
+ */
+static int32_t asr_hw(int32_t v, int n)
+{
+    n &= 0x3f;
+    if (n >= 32)
+        return v < 0 ? -1 : 0;
+    return v >> n;
+}
+
+static int32_t lsl_hw(int32_t v, int n)
+{
+    n &= 0x3f;
+    return n >= 32 ? 0 : ambe_shl32(v, n);
+}
+
+/* ff1 on the value the stock code hands it: the operand is complemented first
+   when negative, at 0x00018E54 and 0x00018F82, so a normalising shift keeps the
+   sign bit and the bit below it distinct. */
+static int norm_shift(int32_t v)
+{
+    return (int)ambe_lzcount32((uint32_t)(v < 0 ? ~v : v)) - 1;
+}
+
+/*
+ * Math_FloatAdd 0x00018DD8.  Mantissas are 16-bit patterns - `zexth r12,r0`
+ * and `zexth r0,r2` at entry, made signed again by the `lsli ...,0x10` before
+ * the alignment - and the sum is formed at max(expA, expB) + 1, which is the
+ * one bit of headroom that keeps it from overflowing.
+ */
+uint16_t ambe_float_add(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
+                        int16_t *exp_out)
+{
+    uint32_t a = (uint32_t)mant_a & 0xFFFFu;
+    uint32_t b = (uint32_t)mant_b & 0xFFFFu;
+    int32_t sum, sh, e;
+    uint32_t r;
+
+    /* 0x00018DE0: A zero, or B more than 31 exponents above it, and B is the
+       answer whole - there is nothing of A left to add at that distance. */
+    if (a == 0 || exp_b - exp_a >= 32) {
+        if (b != 0) {
+            *exp_out = (int16_t)exp_b;
+            return (uint16_t)b;
+        }
+        *exp_out = 0;
+        return 0;
+    }
+    /* 0x00018DFA and 0x00018E00, the mirror image */
+    if (b == 0 || exp_a - exp_b >= 32) {
+        *exp_out = (int16_t)exp_a;
+        return (uint16_t)a;
+    }
+
+    e = (exp_b < exp_a ? exp_a : exp_b) + 1;      /* 0x00018E04 / 0x00018E48 */
+    sum = asr_hw((int32_t)(b << 16), e - exp_b)
+        + asr_hw((int32_t)(a << 16), e - exp_a);
+    if (sum == 0) {                               /* 0x00018E1C */
+        *exp_out = 0;
+        return 0;
+    }
+    sh = norm_shift(sum);
+    r = (uint32_t)lsl_hw(sum, sh) >> 16;
+    if (r == 0) {                                 /* 0x00018E32 */
+        *exp_out = 0;
+        return 0;
+    }
+    *exp_out = (int16_t)(e - sh);
+    return (uint16_t)r;
+}
+
+/*
+ * Math_FloatDivExponent 0x00018EF4.  Both operands are taken to their
+ * magnitudes with the sign carried separately through an XOR, the numerator is
+ * halved first if it would not fit, and the quotient is bits [16:1] of the
+ * divide - `zext r0,r0,0x10,0x1`, which is a shift right by one and a
+ * truncation to 16 bits, not a rounding.
+ *
+ * Both saturating cases are the stock code's and neither is reachable from a
+ * normalised pair: 0x80000000 becomes 0x7FFFFFFF at 0x00018F92 and a divisor
+ * of -32768 becomes 0x7FFF at 0x00018F88.
+ */
+uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
+                            int exp_b, int16_t *exp_out)
+{
+    int32_t d = (int16_t)((uint32_t)mant_b & 0xFFFFu);   /* zexth then sexth */
+    int32_t sign = d ^ mant_a;                           /* xor r4,r12,r0 */
+    int32_t num = mant_a, den, den_hi, sh;
+    uint32_t q;
+
+    if (num < 0)                                         /* 0x00018F50 */
+        num = (num == INT32_MIN) ? INT32_MAX : -num;
+    if (d < 0) {                                         /* 0x00018F60 */
+        if (d == -32768) { den = 0x7FFF; den_hi = 0x7FFF0000; }
+        else             { den = -d;     den_hi = (int32_t)((uint32_t)den << 16); }
+    } else {
+        den = d;
+        den_hi = (int32_t)((uint32_t)den << 16);
+    }
+    if (den == 0) {           /* `divs` traps on the radio; see the header */
+        *exp_out = 0;
+        return 0;
+    }
+    if (den_hi <= num) {                                 /* 0x00018F0C */
+        num >>= 1;
+        exp_a += 1;
+    }
+    q = ((uint32_t)(num / den) >> 1) & 0xFFFFu;          /* 0x00018F18 */
+    if (sign < 0)                                        /* 0x00018F1C */
+        q = (uint32_t)(-(int32_t)q) & 0xFFFFu;
+
+    if (q != 0) {
+        int32_t v = (int32_t)(q << 16);                  /* 0x00018F20 */
+        sh = norm_shift(v);
+        q = (uint32_t)lsl_hw(v, sh) >> 16;
+        if (q != 0) {
+            *exp_out = (int16_t)(exp_a - exp_b - sh);
+            return (uint16_t)q;
+        }
+    }
+    *exp_out = 0;                                        /* 0x00018F48 */
+    return 0;
+}
+
 /* ---------------------------------------------------------- block float */
 
 /*

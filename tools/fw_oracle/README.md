@@ -110,6 +110,33 @@ the firmware's.
 At each wake it peeks the payload buffer, the ring, and the parameter block at
 `pCtx+1000`, whose layout is `Vocoder_CopyFrameParamsWithReset 0x00019CBC`'s.
 
+## Sweeping a leaf instead of capturing one
+
+`gen_basop_jobs.py` is the cheapest shape of job in here, and the one to reach
+for first when a transcription is about to depend on a primitive.
+`Math_FloatAdd 0x00018DD8` and `Math_FloatDivExponent 0x00018EF4` are leaves -
+no state, no memory but the one exponent they write - so they need no capture to
+learn their inputs. They can just be swept.
+
+```sh
+python3 tools/fw_oracle/gen_basop_jobs.py /tmp/basop.job
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/basop.job /tmp/basop.out
+python3 tools/fw_oracle/gen_basop_jobs.py --export /tmp/basop.out \
+        tests/fixtures/basop_float.fw
+```
+
+3377 cases, edges first, and the edges are the point: an exponent difference of
+exactly 31 makes the smaller operand shift by 32, which C leaves undefined and
+the machine renders as everything shifted out. A transcription using C's own
+`>>` - which on an x86 or ARM host is a shift masked to five bits, so no shift at
+all - disagrees with the radio on **257 of the 3377**, and on none of the cases a
+sweep that never reaches a difference of 31 would contain.
+
+Doing this before writing anything that calls them is the whole economy of it:
+`Vocoder_ComputeHarmonicGains 0x0001D71C` calls the pair four times per harmonic,
+so one wrong bit is forty divergences in a single frame, found in 2378 bytes of
+synthesiser rather than in thirty lines of `ambe_basop.c`.
+
 ## The voiced synthesiser
 
 `Vocoder_SynthesizeVoiced 0x0001DE10` is the one stage of the codec with no

@@ -1,0 +1,99 @@
+/*
+ * test_basop_firmware.c - the block-float pair, against the firmware executed.
+ *
+ * test_basop.c sweeps log2, pow2, sqrt and cos against libm, which is the right
+ * measure for a primitive that approximates a real function: what is being
+ * asked there is how accurate the radio is.  These two approximate nothing.
+ * Math_FloatAdd 0x00018DD8 and Math_FloatDivExponent 0x00018EF4 are exact
+ * integer operations on a 16-bit mantissa and a 16-bit exponent, so there is no
+ * tolerance to quote and nothing to compare against but the radio itself.
+ *
+ * The fixture is 3377 cases run under the p-code emulator, edges first:
+ * exponent differences of 31, 32 and 33, the two saturating operands, zero
+ * mantissas on either side and both, every sign combination, then a
+ * deterministic sweep.  tools/fw_oracle/gen_basop_jobs.py.
+ *
+ * The edges are not decoration.  Math_FloatAdd aligns to max(expA, expB) + 1
+ * and its own guard admits a difference of 31, so the smaller operand is
+ * shifted by exactly 32 - which C leaves undefined and the machine renders as
+ * everything shifted out.  Transcribing that as a plain C `>>`, which on this
+ * host compiles to a shift masked to five bits and so shifts by nothing at all,
+ * gives a different answer on 257 of these 3377 cases.  Both readings pass a
+ * sweep that never reaches a difference of 31.
+ *
+ * Why this exists before the code that needs it: the voiced synthesiser calls
+ * the pair four times per harmonic, so one wrong bit here is a divergence forty
+ * times over in one frame, and it would be hunted through 2378 bytes of
+ * Vocoder_SynthesizeVoiced instead of thirty lines of ambe_basop.c.
+ *
+ * SPDX-License-Identifier: ISC
+ */
+#include "ambe.h"
+#include "ambe_basop.h"
+#include "testutil.h"
+
+int main(void)
+{
+    FILE *f = fixture_open("basop_float.fw");
+    char *line = NULL;
+    size_t cap = 0;
+    int n = 0, nadd = 0, ndiv = 0, add_ok = 0, div_ok = 0;
+    int shift32 = 0, sat = 0;
+
+    while (getline(&line, &cap, f) > 0) {
+        long ma, ea, mb, eb, am, ax, dm, dx;
+        char *p = line;
+        uint16_t got;
+        int16_t gx;
+
+        if (line[0] == '#')
+            continue;
+        ma = strtol(p, &p, 10); ea = strtol(p, &p, 10);
+        mb = strtol(p, &p, 10); eb = strtol(p, &p, 10);
+        am = strtol(p, &p, 10); ax = strtol(p, &p, 10);
+        dm = strtol(p, &p, 10); dx = strtol(p, &p, 10);
+
+        gx = 0x7BAD;
+        got = ambe_float_add((int32_t)ma, (int)ea, (int32_t)mb, (int)eb, &gx);
+        nadd++;
+        if (got == (uint16_t)am && gx == (int16_t)ax)
+            add_ok++;
+        else
+            CHECK(0, "add(%ld,%ld, %ld,%ld) = %u/%d, firmware %ld/%ld\n",
+                  ma, ea, mb, eb, (unsigned)got, (int)gx, am, ax);
+
+        /* the alignment shift the machine masks to six bits and C leaves
+           undefined - counted so a fixture that stopped covering it says so */
+        if (labs(ea - eb) == 31 && ma && mb)
+            shift32++;
+        if (ma == INT32_MIN || mb == -32768)
+            sat++;
+
+        if (dm >= 0) {
+            gx = 0x7BAD;
+            got = ambe_float_div_exp((int32_t)ma, (int)ea, (int32_t)mb,
+                                     (int)eb, &gx);
+            ndiv++;
+            if (got == (uint16_t)dm && gx == (int16_t)dx)
+                div_ok++;
+            else
+                CHECK(0, "div(%ld,%ld, %ld,%ld) = %u/%d, firmware %ld/%ld\n",
+                      ma, ea, mb, eb, (unsigned)got, (int)gx, dm, dx);
+        }
+        n++;
+    }
+    free(line);
+    fclose(f);
+
+    CHECK(n > 3000, "only %d cases in the fixture\n", n);
+    CHECK(shift32 > 0, "no case aligns across an exponent difference of 31\n");
+    CHECK(sat > 0, "no case reaches a saturating operand\n");
+    CHECK(add_ok == nadd, "Math_FloatAdd exact on %d of %d\n", add_ok, nadd);
+    CHECK(div_ok == ndiv, "Math_FloatDivExponent exact on %d of %d\n",
+          div_ok, ndiv);
+
+    printf("[%d cases: Math_FloatAdd %d/%d and Math_FloatDivExponent %d/%d "
+           "bit-exact, including %d alignments by exactly 32 and %d saturating "
+           "operands] ", n, add_ok, nadd, div_ok, ndiv, shift32, sat);
+    return t_done("the block-float pair vs the firmware, bit for bit");
+}

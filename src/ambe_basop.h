@@ -112,6 +112,36 @@ extern const int32_t ambe_half_log2_q24[57];
  */
 unsigned int ambe_lzcount32(unsigned int x);
 
+/* ------------------------------------------- the radio's own block float */
+
+/*
+ * Math_FloatAdd 0x00018DD8 and Math_FloatDivExponent 0x00018EF4, exactly: a
+ * 16-bit mantissa and a 16-bit exponent, the value being mant * 2^exp with the
+ * mantissa read as signed 16-bit.
+ *
+ * These are NOT ambe_bf below, and the difference is the point.  ambe_bf is a
+ * wider reimplementation of the same idea, 30 significant bits, for code that
+ * wants the accuracy; these are the radio's, 16 bits and all, for code that has
+ * to produce the radio's exact answer.  The voiced synthesiser is that code -
+ * `Vocoder_ComputeHarmonicGains 0x0001D71C` alone calls the pair four times per
+ * harmonic, and a mantissa one bit wide of the stock one diverges by the second
+ * frame.  tests/test_basop_firmware.c holds them against 3377 cases the radio
+ * answered, and they are exact on every one.
+ *
+ * Both return the normalised mantissa as a 16-bit pattern and write the
+ * exponent through `exp_out`.  Ghidra prototypes Math_FloatDivExponent `void`,
+ * which is wrong: `lsl r0,r2 / lsri r0,r0,0x10` at 0x00018F34 leaves the
+ * quotient in r0 and its callers use it.
+ *
+ * A zero divisor traps on the radio - `divs` raises - so it cannot happen on
+ * any input the codec produces.  Here it returns zero rather than invoking
+ * undefined behaviour, and tests/test_basop_firmware.c does not exercise it.
+ */
+uint16_t ambe_float_add(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
+                        int16_t *exp_out);
+uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
+                            int exp_b, int16_t *exp_out);
+
 /* ---------------------------------------------------------- block float */
 
 /*
