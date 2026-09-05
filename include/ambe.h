@@ -178,6 +178,27 @@ ambe_frame_type ambe_decode_parms(const uint8_t ambe_d[AMBE_BITS],
  */
 void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L);
 
+/* Vocoder_HarmonicCountFromPitch 0x0002AD18: how many harmonics a pitch has. */
+int ambe_harmonic_count(int32_t f0_q19);
+
+/*
+ * The two-frame envelope interpolation, src/ambe_blend.c.  The radio
+ * synthesises each 160-sample frame as two 80-sample halves and builds the
+ * first from this - both frames' envelopes resampled onto a common pitch and
+ * averaged.  Envelopes here are log2 at Q11, the firmware's own units, not
+ * ambe_parms' Q24.
+ */
+int32_t ambe_divide_normalized(int16_t num, int16_t den);
+int32_t ambe_geometric_pitch(int32_t f0_a, int32_t f0_b);
+void ambe_resample_envelope(int16_t *out, int32_t f0_out, int32_t f0_src,
+                            const int16_t *src, int n);
+int32_t ambe_blend_pitch(int32_t f0_a, uint32_t vuv_a,
+                         int32_t f0_b, uint32_t vuv_b, uint32_t vuv_out);
+int ambe_blend_envelope(int16_t *out, int32_t *f0_out,
+                        int32_t f0_a, uint32_t vuv_a, const int16_t *env_a,
+                        int32_t f0_b, uint32_t vuv_b, const int16_t *env_b,
+                        uint32_t vuv_prev_out);
+
 /*
  * True when the frame takes the radio's pitchless parameterisation - no band
  * voiced and at least one voicing crumb in the high-bit state - in which case

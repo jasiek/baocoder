@@ -127,7 +127,7 @@ static int32_t pitch_from_log2_q12(int16_t x)
  * 0.4627 constant of the AMBE literature sitting in the firmware as an
  * integer; the guard below it is the Nyquist limit on the top harmonic.
  */
-static int harmonic_count(int32_t f0_q19)
+int ambe_harmonic_count(int32_t f0_q19)
 {
     int L = sdiv(0x3B39C, f0_q19) & 0xFFFF;
 
@@ -152,7 +152,7 @@ void ambe_pitch_from_b0(int b0, int width, int32_t *f0_q19, int *L_out)
     if (f0 > 0x6BCA) f0 = 0x6BCA;
 
     *f0_q19 = f0;
-    *L_out  = harmonic_count(f0);
+    *L_out  = ambe_harmonic_count(f0);
 }
 
 /*

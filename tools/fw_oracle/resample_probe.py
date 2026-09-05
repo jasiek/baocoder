@@ -207,3 +207,55 @@ if __name__ == "__main__":
     if sys.argv[1] == "--check":
         sys.exit(check(sys.argv[2]))
     gen(sys.argv[1], sys.argv[2], int(sys.argv[3]))
+
+
+def export_blend(outfile, dest):
+    """Write (input A, input B, expected output) triples as a fixture.
+
+    Each record is one instant inside the firmware, so it is immune to the
+    frame-feed drift that makes the rest of this run non-comparable with the
+    corpus: whatever payloads happened to be fed, these three blocks were the
+    interpolator's real arguments and its real result.
+
+    The output block's voicing word is recorded too, and it is not decoration:
+    the pitch branch reads param_1's voicing BEFORE writing it, so what it sees
+    is whatever the previous call left in that stack slot.  A reimplementation
+    has to be handed the same value to make the same decision.
+    """
+    import struct as _s
+    stops, cur = [], None
+    for line in open(outfile):
+        if line.startswith("BREAK "):
+            cur = {"pc": int(line.split()[1], 16), "p": {}}
+            stops.append(cur)
+        elif line.startswith("PEEK ") and cur is not None:
+            _, n, h = line.split()
+            cur["p"][n.rsplit("_", 1)[0]] = bytes.fromhex(h)
+
+    def hdr(b):
+        s = _s.unpack_from("<8h", b, 0)
+        return (s[2], s[6] & 0xFFFF, _s.unpack_from("<I", b, 8)[0])
+
+    def env(b):
+        return _s.unpack_from("<56h", b, 0x10)
+
+    n = 0
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_ResampleSpectralEnvelope 0x00026A84, captured at\n"
+                 "# 0x00026BB4 - after the mix loop, where the output and both\n"
+                 "# inputs are simultaneously live.\n"
+                 "# per record: La f0a vuva  Lb f0b vuvb  vuvOut  Lout f0out\n"
+                 "#             then 56 envA, 56 envB, 56 envOut, all log2 Q11\n")
+        for s in stops:
+            if s["pc"] != BRK_MIXED:
+                continue
+            a, b, o = s["p"]["p2"], s["p"]["p3"], s["p"]["out"]
+            ha, hb, ho = hdr(a), hdr(b), hdr(o)
+            fh.write("%d %d %08x %d %d %08x %08x %d %d %s %s %s\n" % (
+                ha[0], ha[1], ha[2], hb[0], hb[1], hb[2], ho[2], ho[0], ho[1],
+                " ".join(str(x) for x in env(a)),
+                " ".join(str(x) for x in env(b)),
+                " ".join(str(x) for x in env(o))))
+            n += 1
+    print("%s: %d interpolator calls" % (dest, n))
+    return n
