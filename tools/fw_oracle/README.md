@@ -137,6 +137,32 @@ Doing this before writing anything that calls them is the whole economy of it:
 so one wrong bit is forty divergences in a single frame, found in 2378 bytes of
 synthesiser rather than in thirty lines of `ambe_basop.c`.
 
+## Sweeping the helpers too
+
+`gen_vhelper_jobs.py` does the same for the functions inside
+`Vocoder_SynthesizeVoiced`, so each can be settled before the one above it is
+written. `Vocoder_ComputeHarmonicGains 0x0001D71C` is the innermost and reads
+nothing but its seven arguments, so it sweeps as cleanly as a leaf.
+
+```sh
+python3 tools/fw_oracle/gen_vhelper_jobs.py /tmp/vh.job
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/vh.job /tmp/vh.out
+python3 tools/fw_oracle/gen_vhelper_jobs.py --export /tmp/vh.out \
+        tests/fixtures/voiced_gains.fw
+```
+
+Sixteen of its 1600 cases are absent from the fixture and the export says so
+rather than asserting: the function is not total. Its divisor is the
+denominator's mantissa, and arguments where that normalises to zero make `divs`
+trap - a zero sample count, a zero previous pitch with no pitch movement, and
+`prev_pitch = -0x4000` with `delta = -1`, where the two terms under the root
+cancel. A transcription cannot be asked what the radio does on an input the
+radio faults on.
+
+The output buffers are poked `0xEEEE` before each call, so a short the firmware
+did not write reads as 61166 rather than as a plausible zero. That is what
+catches a transcription writing the right values into the wrong slots.
+
 ## The voiced synthesiser
 
 `Vocoder_SynthesizeVoiced 0x0001DE10` is the one stage of the codec with no

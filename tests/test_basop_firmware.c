@@ -85,6 +85,50 @@ int main(void)
     free(line);
     fclose(f);
 
+    {   /* Math_Sqrt, and the demonstration that ambe_sqrt is a different
+           function rather than a rougher version of the same one */
+        FILE *g = fixture_open("basop_sqrt.fw");
+        int sn = 0, sok = 0, agree = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            long m, e, rm, re;
+            char *p = line;
+            int16_t ex;
+            uint32_t got;
+
+            if (line[0] == '#')
+                continue;
+            m  = strtol(p, &p, 10); e  = strtol(p, &p, 10);
+            rm = strtoul(p, &p, 10); re = strtol(p, &p, 10);
+
+            ex = (int16_t)e;
+            got = ambe_float_sqrt((int32_t)m, &ex);
+            sn++;
+            if (got == (uint32_t)rm && ex == (int16_t)re)
+                sok++;
+            else
+                CHECK(0, "sqrt(%ld,%ld) = %u/%d, firmware %lu/%ld\n",
+                      m, e, (unsigned)got, (int)ex, (unsigned long)rm, re);
+            {   /* the older one, on the same case */
+                short oe = (short)e;
+                unsigned int old = ambe_sqrt((int)m, &oe);
+                if ((uint32_t)old == (uint32_t)rm && oe == (short)re)
+                    agree++;
+            }
+        }
+        fclose(g);
+        CHECK(sn > 500, "only %d square roots in the fixture\n", sn);
+        CHECK(sok == sn, "Math_Sqrt exact on %d of %d\n", sok, sn);
+        /* Not a defect in ambe_sqrt: it is measured against libm in
+           test_basop.c and used where that is the right measure.  Asserted so
+           that a later "tidy-up" merging the two has to argue with a test. */
+        CHECK(agree < sn / 2, "ambe_sqrt now matches the firmware on %d of %d - "
+              "if that is deliberate the two should be merged, and if it is not, "
+              "something has changed underneath both\n", agree, sn);
+        printf("[Math_Sqrt %d/%d bit-exact, ambe_sqrt %d/%d - a different "
+               "function, deliberately] ", sok, sn, agree, sn);
+    }
+
     CHECK(n > 3000, "only %d cases in the fixture\n", n);
     CHECK(shift32 > 0, "no case aligns across an exponent difference of 31\n");
     CHECK(sat > 0, "no case reaches a saturating operand\n");

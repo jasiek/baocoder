@@ -48,7 +48,8 @@ import emu
 
 FADD = 0x00018DD8
 FDIV = 0x00018EF4
-EXP  = 0x00051000          # the short both write through their last argument
+SQRT = 0x00019364
+EXP  = 0x00051000          # the short they write through their last argument
 
 
 def _cases():
@@ -78,6 +79,31 @@ def _cases():
     return out
 
 
+def _sqrt_cases():
+    """(mantissa, exponent) for Math_Sqrt 0x00019364.
+
+    Swept for the same reason as the other two and with a sharper edge: this
+    project already has an ambe_sqrt, transcribed and measured against libm at
+    1.3e-3, and it is NOT this function.  The stock code returns its mantissa in
+    the high half of the register, carries a rounding term into every stage, and
+    rounds once more after the odd-exponent correction rather than before it.
+    On this sweep the two agree on one case in 607, which is the sort of thing a
+    tolerance-based test cannot see and a transcription downstream of it cannot
+    survive.
+    """
+    out = [(0, 0), (1, 0), (0x7FFFFFFF, 0), (0x40000000, 1), (0x40000000, 2),
+           (-1, 0), (-0x40000000, 0), (0x7FFFFFFF, 1), (2, -30), (0x10000, 15)]
+    x = 24680
+    for _ in range(600):
+        v = []
+        for _ in range(2):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(x)
+        # the exponent parity selects the 1/sqrt(2) correction, so both are swept
+        out.append(((v[0] << 1) & 0xFFFFFFFF, (v[1] % 61) - 30))
+    return out
+
+
 def gen(jobfile):
     cases = _cases()
     j = emu.Job()
@@ -97,8 +123,14 @@ def gen(jobfile):
                    eb & 0xFFFFFFFF, EXP)
             j.getreg("r0")
             j.peek("de%d" % i, EXP, 2)
+    for i, (m, e) in enumerate(_sqrt_cases()):
+        j.poke(EXP, struct.pack("<h", e))
+        j.call(SQRT, m & 0xFFFFFFFF, EXP)
+        j.getreg("r0")
+        j.peek("se%d" % i, EXP, 2)
     j.write(jobfile)
-    print("wrote %s: %d cases" % (jobfile, len(cases)))
+    print("wrote %s: %d add/divide cases, %d square roots"
+          % (jobfile, len(cases), len(_sqrt_cases())))
     return len(cases)
 
 
@@ -108,7 +140,7 @@ def export(outfile, dest):
     assert not res["faults"], res["faults"][:2]
     assert not res["errors"], res["errors"][:2]
     r0 = [v for n, v in res["regs"] if n == "r0"]
-    k, n = 0, 0
+    k, n, seen = 0, 0, []
     with open(dest, "w") as fh:
         fh.write("# Math_FloatAdd 0x00018DD8 and Math_FloatDivExponent 0x00018EF4,\n"
                  "# executed under the p-code emulator.  tools/fw_oracle/gen_basop_jobs.py.\n"
@@ -125,8 +157,21 @@ def export(outfile, dest):
                 dm = dx = -1
             fh.write("%d %d %d %d %d %d %d %d\n" % (ma, ea, mb, eb, am, ax, dm, dx))
             n += 1
-    assert k == len(r0), "%d register reads for %d consumed" % (len(r0), k)
-    print("%s: %d cases" % (dest, n))
+    with open(dest.replace("float", "sqrt"), "w") as fh:
+        fh.write("# Math_Sqrt 0x00019364, executed under the p-code emulator.\n"
+                 "# tools/fw_oracle/gen_basop_jobs.py.\n"
+                 "# per record: mantissa exponentIn, then the returned mantissa -\n"
+                 "#   which the stock code leaves in the HIGH half of the word - and\n"
+                 "#   the exponent it wrote back.\n")
+        for (m, e) in _sqrt_cases():
+            sm = r0[k]; k += 1
+            sx = struct.unpack("<h", res["peek"]["se%d" % len(seen)][0])[0]
+            seen.append(1)
+            fh.write("%d %d %u %d\n" % (m - (1 << 32) if m >= (1 << 31) else m,
+                                         e, sm, sx))
+    assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
+    print("%s: %d cases, %s: %d square roots"
+          % (dest, n, dest.replace("float", "sqrt"), len(seen)))
     return n
 
 

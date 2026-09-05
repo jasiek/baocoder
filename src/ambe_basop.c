@@ -419,6 +419,55 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
     return 0;
 }
 
+/*
+ * Math_Sqrt 0x00019364, exactly - which ambe_sqrt above is not, and the
+ * difference is not a rounding quibble.
+ *
+ * Three things separate them.  The stock code returns the mantissa in the HIGH
+ * half of r0 (`lsli r0,r0,0x10` at 0x000193D6) because its callers normalise
+ * the whole register and take the top 16 bits back out; ambe_sqrt returns the
+ * mantissa itself.  The stock code carries a rounding term into every stage -
+ * `movi r4,0x80 / lsli r4,r4,0x8` is 0x8000 added before each `>>16` - and
+ * rounds once more at the end, after the odd-exponent correction rather than
+ * before it.  And `mulsh` is a 16x16 product of the low halfwords, not a
+ * multiply-high, so the doubling that follows it is part of the Q15 scaling.
+ *
+ * Swept against the radio, ambe_sqrt agrees on 1 case in 607.  It is measured
+ * against libm at 1.3e-3 in test_basop.c and that is the right measure for what
+ * it is used for; this is the right one for code that has to reproduce the
+ * radio's bits, and the two coexist deliberately.
+ *
+ * Zero in, zero out with the exponent untouched - `bez r0` at 0x00019366 skips
+ * the store.
+ */
+uint32_t ambe_float_sqrt(int32_t mant, int16_t *exp)
+{
+    int32_t sh, norm, acc, inner, e, r;
+
+    if (mant == 0)
+        return 0;
+
+    sh   = (int16_t)(uint16_t)(ambe_lzcount32((uint32_t)mant) - 1);
+    norm = (int32_t)((uint32_t)lsl_hw(mant, sh) >> 16);   /* lsri: logical */
+    e    = (int32_t)((uint32_t)((int32_t)*exp - sh) & 0xFFFF);   /* zexth r2 */
+
+    /* two Horner stages, each rounded by 0x8000 before its shift */
+    acc   = (int32_t)((uint32_t)ambe_sqrt_coeff_q15[1] << 16) + 0x8000
+          + 2 * ((int32_t)(int16_t)ambe_sqrt_coeff_q15[0] * (int16_t)norm);
+    inner = acc >> 16;
+    acc   = (int32_t)((uint32_t)ambe_sqrt_coeff_q15[2] << 16) + 0x8000
+          + 2 * ((int32_t)(int16_t)inner * (int16_t)norm);
+    r     = (int32_t)((uint32_t)((uint32_t)acc >> 16) << 16);
+
+    /* 0x000193BC: an odd exponent leaves a factor of sqrt(2) behind */
+    if (e & 1)
+        r = 2 * ((int32_t)(int16_t)(r >> 16) * (int16_t)ambe_sqrt_coeff_q15[3]);
+
+    r = (int32_t)((uint32_t)((uint32_t)(r + 0x8000) >> 16) << 16);
+    *exp = (int16_t)(((int16_t)e + 1) >> 1);
+    return (uint32_t)r;
+}
+
 /* ---------------------------------------------------------- block float */
 
 /*

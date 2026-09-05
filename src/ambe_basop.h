@@ -142,6 +142,15 @@ uint16_t ambe_float_add(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
 uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
                             int exp_b, int16_t *exp_out);
 
+/*
+ * Math_Sqrt 0x00019364, exactly - which ambe_sqrt above is NOT.  That one is
+ * measured against libm and returns the bare mantissa; this returns it in the
+ * high half of the word the way the stock code does, carries the stock rounding
+ * terms, and is bit-exact.  Swept against the radio, ambe_sqrt agrees on 1 case
+ * in 607, so the two are not interchangeable and neither replaces the other.
+ */
+uint32_t ambe_float_sqrt(int32_t mant, int16_t *exp);
+
 /* ---------------------------------------------------------- block float */
 
 /*
