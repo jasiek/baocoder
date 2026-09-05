@@ -38,4 +38,7 @@ short ambe_fft_window(int32_t *magsq_out, const int16_t *in, int in_len,
  */
 short ambe_fft_forward(int32_t *buf, short scale_exp, int size_bits, int shift);
 
+/* Dsp_FftInverse 0x00025704, the same two subroutines in the opposite order. */
+short ambe_fft_inverse(int32_t *buf, short scale_exp, int size_bits, int shift);
+
 #endif /* AMBE_FFT_H */

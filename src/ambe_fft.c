@@ -267,7 +267,8 @@ static void unpack_recurse(int32_t *lo, int32_t *hi, int tw_stride, int count)
  * ends; the rest is the conjugate-symmetric combination plus the twiddled
  * part above.
  */
-static short unpack_real(int32_t *buf, short scale_exp, int size_bits, int shift)
+static short unpack_real_mode(int32_t *buf, short scale_exp, int size_bits,
+                              int shift, int mode)
 {
     int n = 1 << size_bits;
     int half = (n >> 2) - 1;
@@ -299,8 +300,19 @@ static short unpack_real(int32_t *buf, short scale_exp, int size_bits, int shift
         int32_t *b = top - 1 - i;
         int32_t ar = RE(*a), ai = IM(*a);
         int32_t br = RE(*b), bi = IM(*b);
-        *a = PACK((int16_t)((br + ar) >> 1), (int16_t)((ai - bi) >> 1));
-        *b = PACK((int16_t)((ai + bi) >> 1), (int16_t)((br - ar) >> 1));
+        if (mode == 0) {
+            *a = PACK((int16_t)((br + ar) >> 1), (int16_t)((ai - bi) >> 1));
+            *b = PACK((int16_t)((ai + bi) >> 1), (int16_t)((br - ar) >> 1));
+        } else {
+            /*
+             * Dsp_FftButterflyStage's other mode, at LAB_00025636.  It is this
+             * one with the two difference terms negated, which is the
+             * conjugation an inverse transform needs; everything after - the
+             * twiddled recursion and the midpoint - is shared.
+             */
+            *a = PACK((int16_t)((br + ar) >> 1), (int16_t)((bi - ai) >> 1));
+            *b = PACK((int16_t)((bi + ai) >> 1), (int16_t)((ar - br) >> 1));
+        }
     }
 
     unpack_recurse(buf + 1, top - 1, 0x200 >> size_bits, half);
@@ -327,10 +339,27 @@ static short unpack_real(int32_t *buf, short scale_exp, int size_bits, int shift
 short ambe_fft_forward(int32_t *buf, short scale_exp, int size_bits, int shift)
 {
     short e = bitrev_scale(buf, scale_exp, size_bits - 1);
-    short r = unpack_real(buf, e, size_bits, shift);
+    short r = unpack_real_mode(buf, e, size_bits, shift, 0);
     if (shift == 0)
         buf[0] = PACK(RE(buf[0]), 0);
     return r;
+}
+
+/*
+ * Dsp_FftInverse 0x00025704: the same two subroutines in the opposite order,
+ * with the butterfly in its other mode - decimation in frequency, where the
+ * forward is decimation in time.  The returned exponent is relative to the
+ * transform length rather than absolute, which is the stock convention.
+ */
+short ambe_fft_inverse(int32_t *buf, short scale_exp, int size_bits, int shift)
+{
+    short e;
+
+    if (shift == 0)
+        buf[0] = PACK(RE(buf[0]), 0);
+    e = unpack_real_mode(buf, scale_exp, size_bits, shift, 1);
+    e = bitrev_scale(buf, e, size_bits - 1);
+    return (short)(e - size_bits + 1);
 }
 
 /* Dsp_ComputeMagnitudeSquared 0x0001AB38 */
