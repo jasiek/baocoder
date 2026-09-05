@@ -286,7 +286,8 @@ short ambe_unvoiced_shape(int32_t *fft, int n, int cls, int L, int16_t f0_q19,
          * instead.  Which branch runs is `*pFrameParams == 2` - the stock
          * code computes it with `cmpnei r3,2; mvcv r12` at 0x0001B1E0, which
          * is worth naming because Ghidra's C-SKY module got that instruction
-         * wrong; see docs/patches/csky-mvcv.patch.
+         * wrong - csky-mvcv.patch in the reverse-engineering project's
+         * docs/patches/.
          */
         if (cls != 2) {
             gexp  = 0x11;

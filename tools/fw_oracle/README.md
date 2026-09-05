@@ -32,9 +32,10 @@ python3 tools/fw_oracle/export.py /tmp tests/fixtures
 
 ## The sleigh has to be patched first
 
-`docs/patches/csky-mvcv.patch` corrects the 16-bit `mvcv` constructor, which
-produced 0xFE/0xFF instead of 0/1 and so made every branch on a condition the
-compiler had moved into a register go the same way. It is not optional: without
+`csky-mvcv.patch`, in the reverse-engineering project's `docs/patches/`
+alongside the other C-SKY sleigh fixes, corrects the 16-bit `mvcv`
+constructor, which produced 0xFE/0xFF instead of 0/1 and so made every branch
+on a condition the compiler had moved into a register go the same way. It is not optional: without
 it `Vocoder_SynthesizeUnvoiced` takes the wrong one of its two gain paths on
 every frame.
 

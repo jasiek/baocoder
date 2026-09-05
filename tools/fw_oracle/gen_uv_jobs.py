@@ -38,10 +38,11 @@ stop and asserted rather than assumed.
     python3 tools/fw_oracle/gen_uv_jobs.py --export /tmp/uv.out \
             tests/fixtures/dm32_arc4_1.fwunvoiced
 
-REQUIRES the C-SKY sleigh patched with docs/patches/csky-mvcv.patch.  Without
-it `mvcv` yields 0xFE/0xFF instead of 0/1, every branch on a condition moved
-into a register goes the wrong way, and this function in particular takes the
-class-2 gain path for every frame.
+REQUIRES the C-SKY sleigh patched with `csky-mvcv.patch` from the
+reverse-engineering project's `docs/patches/`.  Without it `mvcv` yields
+0xFE/0xFF instead of 0/1, every branch on a condition moved into a register
+goes the wrong way, and this function in particular takes the class-2 gain
+path for every frame.
 
 SPDX-License-Identifier: ISC
 """
