@@ -5,7 +5,12 @@ Reads the EmuRun output of tools/emu driving Vocoder_TxTask 0x0002EC30 over the
 capture's payloads and writes, per capture:
 
   <name>.fwparms   one line per frame: class L f0 voicing-word(hex)
+  <name>.fwenv     one line per frame: L int16 log2 amplitudes, Q11, from the
+                   FOURTH parameter block at +0x198 - the frame's own decoded
+                   spectral envelope, before the two-frame interpolation
   <name>.fwamps    one line per frame: L int16 spectral amplitudes (params+0x10)
+                   - the block that is synthesised, i.e. AFTER
+                   Vocoder_ResampleSpectralEnvelope 0x00026A84
   <name>.fwpcm     raw int16 PCM, 160 samples per frame
 
 The parameter block layout is Vocoder_CopyFrameParamsWithReset 0x00019CBC's:
@@ -24,6 +29,8 @@ OUT = sys.argv[2] if len(sys.argv) > 2 else "tests/fixtures"
 HALF = 0x50
 RING = 0xA0
 
+ENV = 0x198          # the fourth block: class +0, L +4, f0 +0xC, envelope +0x10
+
 def export(cap, amps=False, pcm=False):
     res = emu.parse("%s/%s.out" % (S, cap))
     assert not res["faults"] and not res["errors"], (cap, res["faults"][:2])
@@ -36,7 +43,14 @@ def export(cap, amps=False, pcm=False):
             p = res["peek"]["par%d" % f][0]
             w = emu.u16(p, 8) | (emu.u16(p, 0x0A) << 16)
             fh.write("%d %d %d %08x\n" % (emu.u16(p, 0), emu.u16(p, 4), emu.u16(p, 0xC), w))
-    written = ["%s.fwparms" % cap]
+    with open("%s/%s.fwenv" % (OUT, cap), "w") as fh:
+        fh.write("# the frame's own decoded spectral envelope, log2 at Q11,\n"
+                 "# from the parameter block at +0x198 - what ambe_parms.log2Ml is\n")
+        for f in range(n):
+            p = res["peek"]["par%d" % f][0]
+            L = emu.u16(p, ENV + 4)
+            fh.write(" ".join(str(emu.s16(p, ENV + 0x10 + 2 * k)) for k in range(L)) + "\n")
+    written = ["%s.fwparms" % cap, "%s.fwenv" % cap]
     if amps:
         with open("%s/%s.fwamps" % (OUT, cap), "w") as fh:
             fh.write("# firmware spectral amplitudes, params+0x10, int16 block float\n"

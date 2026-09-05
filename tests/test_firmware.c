@@ -32,13 +32,6 @@
 #include "ambe.h"
 #include "testutil.h"
 
-/*
- * Frames after a non-voice frame before the envelope predictor has forgotten
- * the state difference that frame seeded.  0.65^7 = 0.049 against a seed of
- * 1.12 log2, which is where the measured decay lands.
- */
-#define AMBE_STEADY 8
-
 /* The firmware's voicing band for harmonic l: sixteen bands, not eight. */
 static int fw_band(int l, int32_t f0_q19)
 {
@@ -115,13 +108,89 @@ done:
 }
 
 /*
- * The amplitudes, on the one capture whose firmware array is carried.  They
- * are block floating point on both sides with different exponents, so what is
- * compared is the shape: the per-frame RMS of log2(firmware) - log2(ours)
- * after the constant offset between them is removed.
+ * The spectral envelope, over every capture.
+ *
+ * `<name>.fwenv` is the frame's OWN decoded envelope - the parameter block at
+ * `+0x198`, log2 at Q11 - which is exactly what `ambe_parms.log2Ml` is.  This
+ * is the comparison that matters, and it is nearly exact.
+ *
+ * It is not the array `.fwamps` carries.  That one is `+0x10`, which
+ * `Vocoder_ResampleSpectralEnvelope 0x00026A84` has since rewritten by
+ * interpolating this frame's envelope with the previous frame's onto a common
+ * pitch - a stage this decoder does not have.  Comparing against it, which is
+ * what this test used to do, charged the envelope decode 1.15 dB for a missing
+ * stage downstream of it.  cmp_interpolated below keeps that number, labelled
+ * for what it is.
  */
-static void cmp_amplitudes(const char *name, double *worst, double *sum,
-                           int *count, double *tsum, int *tcount)
+static void cmp_envelope(const char *name, double *worst, double *sum, int *count)
+{
+    char pb[128];
+    char *fb = NULL;
+    size_t fcap = 0;
+    FILE *fp, *fe;
+    ambe_parms cur, prev, prev_enh;
+
+    snprintf(pb, sizeof(pb), "%s.ambe49", name);
+    fp = fixture_open(pb);
+    snprintf(pb, sizeof(pb), "%s.fwenv", name);
+    fe = fixture_open(pb);
+
+    ambe_init_parms(&cur, &prev, &prev_enh);
+
+    while (fgets(pb, sizeof(pb), fp)) {
+        uint8_t d[AMBE_BITS];
+        ambe_frame_info info;
+        ambe_frame_type type;
+        double dl[AMBE_MAX_HARMONICS + 1], mean = 0, acc = 0, r;
+        int i, l, m = 0;
+        char *p;
+
+        if (strlen(pb) < AMBE_BITS)
+            continue;
+        do {
+            if (getline(&fb, &fcap, fe) < 0)
+                goto done;
+        } while (fb[0] == '#');
+
+        for (i = 0; i < AMBE_BITS; i++)
+            d[i] = (uint8_t)(pb[i] == '1');
+        memset(&info, 0, sizeof(info));
+        type = ambe_decode_parms(d, &cur, &prev, &info);
+        if (type == AMBE_FRAME_VOICE)
+            ambe_move_parms(&cur, &prev);
+
+        p = fb;
+        if (type != AMBE_FRAME_VOICE || cur.L < 8)
+            continue;
+        for (l = 1; l <= cur.L; l++) {
+            /* the fixture is Q11 log2; t_log2ml is the same thing as a double */
+            dl[l] = (double)strtol(p, &p, 10) / 2048.0 - t_log2ml(&cur, l);
+            mean += dl[l];
+            m++;
+        }
+        if (m != cur.L)
+            continue;
+        mean /= m;
+        for (l = 1; l <= cur.L; l++)
+            acc += (dl[l] - mean) * (dl[l] - mean);
+        r = sqrt(acc / m);
+        if (r > *worst) *worst = r;
+        *sum += r;
+        (*count)++;
+    }
+done:
+    free(fb);
+    fclose(fp);
+    fclose(fe);
+}
+
+/*
+ * The interpolated envelope the radio actually synthesises from, on the one
+ * capture whose array is carried.  Reported, not required: closing this needs
+ * Vocoder_ResampleSpectralEnvelope written, and until it is the number is a
+ * measure of a missing stage rather than of an error.
+ */
+static void cmp_interpolated(const char *name, double *sum, int *count)
 {
     char pb[128];
     char *fb = NULL;
@@ -134,8 +203,6 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
     snprintf(pb, sizeof(pb), "%s.fwamps", name);
     fa = fixture_open(pb);
 
-    int since = 99;
-
     ambe_init_parms(&cur, &prev, &prev_enh);
 
     while (fgets(pb, sizeof(pb), fp)) {
@@ -143,7 +210,7 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
         ambe_frame_info info;
         ambe_frame_type type;
         ambe_parms enh;
-        double dl[AMBE_MAX_HARMONICS + 1], mean = 0, acc = 0, r;
+        double dl[AMBE_MAX_HARMONICS + 1], mean = 0, acc = 0;
         int i, l, m = 0;
         char *p;
 
@@ -151,26 +218,21 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
             continue;
         do {
             if (getline(&fb, &fcap, fa) < 0)
-                goto done;
+                goto done2;
         } while (fb[0] == '#');
 
         for (i = 0; i < AMBE_BITS; i++)
             d[i] = (uint8_t)(pb[i] == '1');
         memset(&info, 0, sizeof(info));
         type = ambe_decode_parms(d, &cur, &prev, &info);
-
         if (type == AMBE_FRAME_VOICE)
             ambe_move_parms(&cur, &prev);
 
-        /* what the firmware parks is the enhanced spectrum, before the
-           unvoiced gain - the same point ambe_decoder.c reaches */
         enh = cur;
         ambe_enhance_spectrum(&enh);
 
         p = fb;
-        if (type != AMBE_FRAME_VOICE) { since = 0; continue; }
-        since++;
-        if (cur.L < 8)
+        if (type != AMBE_FRAME_VOICE || cur.L < 8)
             continue;
         for (l = 1; l <= cur.L; l++) {
             long v = strtol(p, &p, 10);
@@ -180,30 +242,15 @@ static void cmp_amplitudes(const char *name, double *worst, double *sum,
             mean += dl[l];
             m++;
         }
-        if (m == cur.L) {
-            mean /= m;
-            for (l = 1; l <= cur.L; l++)
-                acc += (dl[l] - mean) * (dl[l] - mean);
-            r = sqrt(acc / m);
-            /*
-             * Split, and both bounded the same, because they used to be two
-             * populations and are not any more.  Propagating a b0 >= 120 frame
-             * into the predictor put the frame after a silence run at 1.12
-             * log2, decaying at the codec's own 0.65 over the next seven;
-             * holding it puts that frame at 0.20, which is the settled figure.
-             * Keeping the split is what makes a regression visible.
-             */
-            if (since >= AMBE_STEADY) {
-                if (r > *worst) *worst = r;
-                *sum += r;
-                (*count)++;
-            } else {
-                *tsum += r;
-                (*tcount)++;
-            }
-        }
+        if (m != cur.L)
+            continue;
+        mean /= m;
+        for (l = 1; l <= cur.L; l++)
+            acc += (dl[l] - mean) * (dl[l] - mean);
+        *sum += sqrt(acc / m);
+        (*count)++;
     }
-done:
+done2:
     free(fb);
     fclose(fp);
     fclose(fa);
@@ -213,8 +260,8 @@ int main(void)
 {
     t_capture cap[16];
     int ncap = load_captures(cap, 16), i;
-    int frames = 0, harmonics = 0, voice = 0, count = 0, tcount = 0;
-    double worst = 0.0, sum = 0.0, tsum = 0.0;
+    int frames = 0, harmonics = 0, voice = 0, count = 0, icount = 0;
+    double worst = 0.0, sum = 0.0, isum = 0.0;
 
     CHECK(ncap >= 6, "expected at least 6 captures in the manifest, got %d\n", ncap);
     for (i = 0; i < ncap; i++) {
@@ -226,37 +273,29 @@ int main(void)
     }
     CHECK(frames == 2052, "expected 2052 frames, compared %d\n", frames);
 
-    cmp_amplitudes("dm32_arc4_1", &worst, &sum, &count, &tsum, &tcount);
-    CHECK(count > 100, "only %d settled frames' amplitudes were comparable\n", count);
-    CHECK(tcount > 20, "only %d transient frames; the split is not exercised\n", tcount);
+    for (i = 0; i < ncap; i++)
+        cmp_envelope(cap[i].name, &worst, &sum, &count);
+    CHECK(count > 1000, "only %d frames' envelopes were comparable\n", count);
     /*
-     * The amplitudes are the one layer not at parity, and the bound is the
-     * measured figure rather than a round number, so that closing the gap has
-     * to come back here and tighten it.  1.1 dB.  The residual is flat with
-     * depth below the frame's peak until the last few bits, so it is not the
-     * fixture's int16 precision - it is a real difference in the envelope
-     * chain, and it is the same on both sides of the split.
+     * 0.020 dB, measured over every voice frame of all six captures.  This is
+     * the spectral envelope against the radio's own, and it is the bound to
+     * tighten if the envelope chain is ever improved - not the interpolated
+     * figure below, which is a different quantity.
      */
-    CHECK(sum / count < 0.21,
-          "settled amplitude residual %.4f log2 (%.2f dB) above the measured 0.197\n",
+    CHECK(sum / count < 0.004,
+          "envelope residual %.5f log2 (%.3f dB) above the measured 0.0034\n",
           sum / count, 6.02 * sum / count);
-    CHECK(worst < 1.0, "worst settled amplitude residual %.4f log2 too large\n", worst);
-    /*
-     * The transient is gone, and this is where that is asserted: holding the
-     * predictor across a b0 >= 120 frame brought the frames right after one
-     * from 0.65 log2 to the settled figure, so the two populations now get the
-     * same bound.  Loosening this one is the regression to catch.
-     */
-    CHECK(tsum / tcount < 0.21,
-          "the frames after a non-voice frame are at %.4f log2 (%.2f dB), "
-          "above the settled bound - the predictor hold has regressed\n",
-          tsum / tcount, 6.02 * tsum / tcount);
+    CHECK(worst < 0.10, "worst envelope residual %.4f log2 too large\n", worst);
+
+    cmp_interpolated("dm32_arc4_1", &isum, &icount);
+    CHECK(icount > 100, "only %d frames for the interpolated comparison\n", icount);
 
     printf("[%d frames, %d voice: L, f0, class and all %d voicing decisions "
-           "exact; amplitudes %.2f dB settled (%d frames), %.2f dB in the "
-           "%d frames after a non-voice frame] ",
-           frames, voice, harmonics, 6.02 * sum / count, count,
-           6.02 * tsum / tcount, tcount);
+           "exact; spectral envelope %.3f dB mean over %d frames, %.3f dB worst; "
+           "%.2f dB against the interpolated block the radio synthesises, which "
+           "is a stage this decoder does not have] ",
+           frames, voice, harmonics, 6.02 * sum / count, count, 6.02 * worst,
+           6.02 * isum / icount);
 
     return t_done("against the firmware's own decoder, p-code emulated");
 }

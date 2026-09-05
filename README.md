@@ -18,7 +18,7 @@ same frames; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 1 187 978 checks against the radio's own decoder, plus the integer-only check
+make test     # 1 187 977 checks against the radio's own decoder, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -204,7 +204,7 @@ open-source decoders, not as the definition of correct.
 | harmonic count `L` | **2 052 / 2 052** |
 | fundamental `f0`, Q19, exact | **2 052 / 2 052** |
 | voicing, per harmonic | **71 977 / 71 977** |
-| spectral amplitudes | 1.15 dB, not exact |
+| spectral envelope | **0.021 dB** over 1 664 voice frames |
 | synthesised audio, 16-band spectrum | 0.973 mean correlation |
 
 The payload comparison needs one fixed permutation, because the firmware's
@@ -278,15 +278,14 @@ when the return is `AMBE_FRAME_VOICE`, and the header says so.
 
 ### What is left, and it is one layer
 
-* **The spectral amplitudes, 1.15 dB** — and now localised to two harmonics'
-  worth of the envelope. Stub the log2 -> linear conversion and the enhancement
-  in the emulator and the firmware's raw log2 envelope can be read out and
-  compared harmonic by harmonic: at the predictor's fixed point it agrees with
-  `log2Ml` to **±0.03 log2 (0.06 dB)** on harmonics 2 through the end of
-  prediction block 3, and diverges only at **harmonic 1** and in **block 4**.
-  Blocks 2 and 3 project to zero on every DCT coefficient.
-  `docs/amplitude-gap.md` has the chase, the firmware chain read end to end, and
-  the eliminations.
+* **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is not implemented here** —
+  the radio interpolates this frame's spectral envelope with the previous one
+  onto a common pitch before synthesising, and this decoder interpolates in the
+  overlap-add instead. That, and not any error in the envelope decode, was the
+  "1.15 dB amplitude gap": the fixture had been exported from the block *after*
+  that stage. Against the frame's own decoded envelope — the fourth parameter
+  block, at `+0x198` — `log2Ml` agrees to **0.021 dB** over every voice frame of
+  all six captures. `docs/amplitude-gap.md` has the chase and the chain read.
 * **What the radio parks on a non-voice frame**, 0.345 log2 and flat across a
   run. This decoder synthesises comfort noise from the frame's own decoded
   envelope; the radio's array is something else. It is a separate question from
@@ -365,7 +364,7 @@ decoder, executed:
 | `test_basop` | the firmware's log2, pow2, sqrt and cos swept across their **whole** input domains against libm, plus log2's coefficients against the Taylor series they turn out to be | 10 621 checks; cos 6.1e-5, log2 2.6e-3, pow2 1.2e-4, sqrt 1.3e-3 — the radio's accuracies, not this code's |
 | `test_tables` | every quantiser value extracted from the image against mbelib's reconstruction, in Q11 steps; block lengths and all 32 voicing rows exactly; each block row summing to `L`; the firmware's pitch law over all 120 indices | 3 123 checks, PRBA worst **0.50 LSB**, voicing **32/32**, pitch `f0` **4.8e-5** / `L` **120/120** |
 | `test_fec` | all 49 payload bits and both Golay error counts, per frame, against mbelib's FEC; the library's deinterleave against the firmware's formula written out again; encoder is the exact inverse of the decoder | 45 723 checks, 0.24 corrected bits/frame |
-| `test_firmware` | **the parity test.** Every frame against the firmware's own decoder, executed: classification, `L`, `f0` and every voicing decision required to be *exact*, amplitudes bounded | 78 146 checks; 2 052 frames, **all exact**; amplitudes 1.12 dB settled and 1.14 dB right after a non-voice frame — the same, which is the predictor rule holding |
+| `test_firmware` | **the parity test.** Every frame against the firmware's own decoder, executed: classification, `L`, `f0` and every voicing decision required to be *exact*, the spectral envelope bounded | 78 145 checks; 2 052 frames, **all exact**; envelope **0.021 dB** mean, 0.279 dB worst |
 | `test_mbelib` | how well mbelib decodes the same frames, given the radio is the definition | 10 614 checks; `w0` 3.1e-6, `L` 242/242, voicing **10 006/10 006** exact; predictor state **4.3%** on gain and **12.9%** on amplitudes apart |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.973**, worst 0.805; mbelib on the same reference 0.968 |
 | `test_e2e` | on-air bytes → FEC → decrypt → audio for all six captures, against JMBE's `expected.wav` | mean band correlation **0.952** across six captures |
@@ -425,11 +424,11 @@ statistic matters as much as the accepted one.
 
 ## Fixtures
 
-`tests/fixtures/` holds only derived vectors, ~990 KB. Three kinds:
+`tests/fixtures/` holds only derived vectors, ~1.4 MB. Three kinds:
 
 * `.frames` `.fec49` `.ambe49` — the on-air bytes, the FEC output and the
   decrypted 49-bit payloads for the six captures.
-* `.fwparms` `.fwamps` `.fwpcm` — **the radio's own answers**, produced by
+* `.fwparms` `.fwenv` `.fwamps` `.fwpcm` — **the radio's own answers**, produced by
   running `Vocoder_TxTask 0x0002EC30` out of the firmware image under the
   p-code emulator in `baofeng-dm32uv-reveng` over those same payloads. This is
   what `test_firmware` compares against, and regenerating it needs that project
