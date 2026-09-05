@@ -15,6 +15,8 @@ call path here is fixed, so the stack is deterministic.
 
   0x00026B32  after the FIRST mix operand is built and the second call returns
   0x00026BB4  after the mix loop - out, local_104 and local_94 all live
+  0x00019DB8  Vocoder_SynthesizeFrame entry, to read which block it is handed
+  0x00016CDC  Vocoder_ConfigureFrame entry, the caller that owns the stack block
   local_104   0x00057C7C   56 x int16, param_2's envelope resampled
   local_94    0x00057CEC   56 x int16, param_3's envelope resampled
   param_1     0x00057E14   the OUTPUT, a caller's stack local - which is why no
@@ -40,7 +42,9 @@ REVENG = os.environ.get("REVENG",
                  "baofeng-dm32uv-reveng"))
 sys.path.insert(0, os.path.join(REVENG, "tools", "emu"))
 
-BRK_MIXED = 0x00026BB4
+BRK_MIXED  = 0x00026BB4
+BRK_SYNTH  = 0x00019DB8
+BRK_CONFIG = 0x00016CDC
 L104, L94, POUT = 0x00057C7C, 0x00057CEC, 0x00057E14
 PARAM_2, PARAM_3 = 0x00045AA4, 0x00045C3C
 BLK = 0x198
@@ -54,6 +58,8 @@ def gen(jobfile, framesfile, nframes):
         j.hook_ret(addr, 0)
     j.hook_break(D.BRK_AFTER_PEND)
     j.hook_break(BRK_MIXED)
+    j.hook_break(BRK_SYNTH)
+    j.hook_break(BRK_CONFIG)
     j.poke(V.TX_CTX + D.F_GATE, b"\x01")
     j.poke(V.TX_CTX + D.F_MODE, b"\x00" * D.N_MODE)
     j.call(D.TX_TASK, D.SCRATCH_ERR)
@@ -62,6 +68,8 @@ def gen(jobfile, framesfile, nframes):
         j.poke(V.TX_CTX + D.F_FILL, struct.pack("<h", D.HALF))
         j.poke(V.TX_CTX + D.F_BURST + (f % 3) * 9, frames[f])
         j.resume()
+        for r in ("sp", "r0", "r1", "r2", "r3"):
+            j.getreg(r)
         j.peek("p2_%d" % w, PARAM_2, BLK)
         j.peek("p3_%d" % w, PARAM_3, BLK)
         j.peek("l104_%d" % w, L104, 0x70)
@@ -113,11 +121,14 @@ def check(outfile):
     stops, cur = [], None
     for line in open(outfile):
         if line.startswith("BREAK "):
-            cur = {"pc": int(line.split()[1], 16), "p": {}}
+            cur = {"pc": int(line.split()[1], 16), "p": {}, "r": {}}
             stops.append(cur)
         elif line.startswith("PEEK ") and cur is not None:
             _, n, h = line.split()
             cur["p"][n.rsplit("_", 1)[0]] = bytes.fromhex(h)
+        elif line.startswith("REG ") and cur is not None:
+            _, n, h = line.split()
+            cur["r"][n] = int(h, 16)
 
     def hdr(b):
         s = struct.unpack_from("<8h", b, 0)
@@ -169,6 +180,26 @@ def check(outfile):
     print("  local_104 reproduced bit-exact %d/%d" % (r104, n))
     print("  local_94  reproduced bit-exact %d/%d" % (r94, n))
     print("  out == clamp((l104+l94)/2)     %d/%d" % (mix_ok, n))
+
+    # Where the interpolated block goes.  Vocoder_ConfigureFrame renders as
+    #     ProcessFrameSignaling(..., pCtx+1000, asStack_ac, pCtx);
+    #     SynthesizeFrame(asStack_ac, pOutBuf, nFrameSize, 0, pCtx);
+    # so r0 at the synthesiser's entry says whether asStack_ac is POUT.  Each
+    # 160-sample frame is built as two 80-sample halves and the two calls take
+    # different sources, so the pairing is what to report.
+    sy = [s for s in stops if s["pc"] == BRK_SYNTH]
+    from_interp = sum(1 for s in sy if s["r"].get("r0") == POUT)
+    from_params = sum(1 for s in sy if s["r"].get("r0") == PARAM_2)
+    pairs = sum(1 for a, b in zip(sy, sy[1:])
+                if a["r"].get("r0") == POUT and b["r"].get("r0") == PARAM_2
+                and b["r"].get("r1", 0) - a["r"].get("r1", 0) == 0xA0)
+    print("Vocoder_SynthesizeFrame calls: %d" % len(sy))
+    print("  handed the interpolated block (0x%08X) %d" % (POUT, from_interp))
+    print("  handed PARAMS+0x000 (0x%08X)           %d" % (PARAM_2, from_params))
+    print("  interpolated-then-current into adjacent 80-sample halves: %d"
+          % pairs)
+    print("  other sources: %d" % (len(sy) - from_interp - from_params))
+
     return 0 if (pitch_ok == r104 == r94 == mix_ok == n) else 1
 
 

@@ -58,7 +58,10 @@ python3 tools/fw_oracle/resample_probe.py --check /tmp/probe.out
 ```
 
 The check re-derives the pitch selection, both resamplings and the mix from the
-peeked bytes and reports how many of each match the firmware exactly.  It is not
+peeked bytes and reports how many of each match the firmware exactly.  It also
+breaks at `Vocoder_SynthesizeFrame 0x00019DB8` and reads `r0`, which is what
+established that the interpolated block is the synthesiser's input for the first
+80-sample half of every frame and `PARAMS+0x000` for the second.  It is not
 part of `make test`: it needs the emulator, and it produces a measurement rather
 than an assertion about this library.  Its frame feed drifts from the corpus -
 see the module docstring - so its output is not comparable with the `.fw*`

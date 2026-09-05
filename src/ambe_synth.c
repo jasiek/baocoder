@@ -20,7 +20,23 @@
  *
  * The stock implementation synthesises through an inverse FFT
  * (Dsp_FftInverse 0x00025704) where this one sums sinusoids directly; the
- * model is the same, the arithmetic is not.  What is shared is the number
+ * arithmetic is not the same, and neither - measured - is the model.
+ *
+ * Vocoder_ConfigureFrame 0x00016CDC calls Vocoder_SynthesizeFrame TWICE per
+ * AMBE frame, into 80-sample halves of the 160-sample output (the two
+ * destinations are 0xA0 apart, and the pairing holds on 57 of 57 observed
+ * frames).  The first half is synthesised from the block
+ * Vocoder_ResampleSpectralEnvelope 0x00026A84 builds - this frame's envelope
+ * and the previous frame's, resampled onto a common pitch by the FREQUENCY
+ * ratio f0_out/f0_src and averaged - and the second from the current frame's
+ * parameters alone.  On the frames where both are voiced that common pitch is
+ * sqrt(2*f0cur*f0prev), belonging to neither coded frame.
+ *
+ * This function does mbelib's thing instead: one 160-sample pass blending prev
+ * and cur per harmonic INDEX through the trapezoidal window below.  It is a
+ * different interpolation, and it is the remaining distance between this
+ * decoder and the radio's audio (0.973 band correlation, mbelib 0.968).
+ * See docs/amplitude-gap.md and tools/fw_oracle/resample_probe.py.  What is shared is the number
  * system: integers throughout, with the radio's own cos and sqrt.
  *
  * Two things are exact here that were not in floating point:

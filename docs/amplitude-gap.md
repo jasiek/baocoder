@@ -127,24 +127,69 @@ The algorithm:
 4. **Average**, `(a + b) / 2` through a 32-bit add-and-halve that stitches the
    sign bit back with `lsli/or`, clamped to `[0x8801, 0x77FF]`.
 
-## What is left
+## Where the interpolated frame goes
 
-**Where the interpolated frame goes is not established.** It is
-`Vocoder_DecodeAmbeFrame 0x0002033C`'s `pOutFrame`, but that function's
-rendering in `Vocoder_ProcessFrameSignaling 0x000198CC` —
-`Vocoder_DecodeAmbeFrame(pFrameParams, 0x44, pOutFrameParams, 0x44, ...)` —
-does not match the register arguments the emulator observes, so the decompiler
-cannot be trusted on the marshalling here and the claim is not made. Reading it
-means breaking further up the call chain, which is the obvious next step.
+Established, by reading `r0` at the synthesiser's entry rather than trusting the
+decompiler — which had already been caught rendering
+`Vocoder_DecodeAmbeFrame`'s marshalling in a way the machine contradicts.
+`Vocoder_ConfigureFrame 0x00016CDC` renders as
 
-If it is what the synthesiser consumes, then on the 53-in-232 frames that take
-the geometric-mean branch the radio synthesises at a pitch and harmonic count
-belonging to neither coded frame, and this decoder does not model that.
+```c
+if (bSkipSignaling == 0) {
+    Vocoder_ProcessFrameSignaling(..., pCtx + 1000, asStack_ac, pCtx);
+    Vocoder_SynthesizeFrame(asStack_ac,            pOutBuf, nFrameSize, 0, pCtx);
+} else {
+    Vocoder_SynthesizeFrame((short *)(pCtx + 1000), pOutBuf, nFrameSize,
+                            bSkipSignaling, pCtx);
+}
+```
 
-**None of this moves the parity statement**, which is stated against the coded
-model parameters — classification, `L`, `f0`, voicing and the spectral envelope
-of `PARAMS+0x000`, all exact or within 0.021 dB — and the synthesised audio
-correlates with the radio's own at 0.973 against mbelib's 0.968 on the same
-reference.
+and over 115 live calls that is exactly what the registers say:
+
+```
+Vocoder_SynthesizeFrame calls: 115
+  handed the interpolated block (0x00057E14) 58
+  handed PARAMS+0x000 (0x00045AA4)           57
+  interpolated-then-current into adjacent 80-sample halves: 57
+  other sources: 0
+```
+
+`r1` is the giveaway: the two destinations are `0x0004682A` and `0x000468CA`,
+`0xA0` apart, which is 80 samples. So **each 160-sample AMBE frame is
+synthesised as two 80-sample halves**, and the observed order never varies:
+
+```
+pend -> ConfigureFrame -> [interpolate] -> SYNTH(src=interpolated, dst=half 0)
+pend -> ConfigureFrame ->                  SYNTH(src=PARAMS+0x000, dst=half 1)
+```
+
+Half 0 comes from the current and previous frames' envelopes resampled onto a
+common pitch and averaged. Half 1 comes from the current frame alone. That also
+explains the in-place log2 -> linear rewrite of `params+0x10` between the two
+wakes: the second call is handed that block and normalises it where it sits,
+which is why `.fwamps` carries linear amplitudes for the *second* half of the
+frame while the first half's live only in the stack block.
+
+## What this decoder does instead
+
+`src/ambe_synth.c` synthesises all 160 samples in one pass, blending `prev` and
+`cur` **per harmonic index `l`** through a trapezoidal window — mbelib's model,
+and a defensible one. It is not the radio's. Two differences are structural:
+
+* the radio blends **envelopes on a common frequency grid**, once, and applies
+  the result to half the frame; this blends **harmonics by index**, continuously,
+  across all of it;
+* on the 53-in-232 frames that take the geometric-mean branch, the radio's first
+  half uses a pitch and harmonic count belonging to **neither** coded frame. An
+  index-matched blend cannot express that at all.
+
+So this is the honest account of the remaining synthesis distance — 0.973 band
+correlation against the radio's own audio, versus mbelib's 0.968 on the same
+reference. Closing it means synthesising in two halves from a resampled
+parameter set, which is a change to the synthesis path, not to the decode.
+
+**None of it moves the parity statement**, which is made against the coded model
+parameters — classification, `L`, `f0`, voicing and the spectral envelope of
+`PARAMS+0x000` — all exact or within 0.021 dB.
 
 SPDX-License-Identifier: ISC
