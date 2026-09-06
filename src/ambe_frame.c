@@ -11,6 +11,7 @@
  *
  * Being written leaves-first like the voiced synthesiser was:
  *
+ *   FUN_0001ABDC                       0x0001ABDC   here (was in ambe_unvoiced.c)
  *   Math_ArrayShiftCopy                0x0001AB58   here
  *   Math_PopCountBits                  0x000189F4   here
  *   Math_SqrtScaled                    0x000193E0   here
@@ -531,4 +532,51 @@ void ambe_array_shift_saturate(int16_t *dst, const int16_t *src, int count,
                 dst[i] = (int16_t)((uint32_t)ambe_lsl_hw((int32_t)v, sh) >> 16);
         }
     }
+}
+
+/*
+ * FUN_0001abdc: twice the dot product of two int16 arrays, renormalised.
+ *
+ * Lived in ambe_unvoiced.c until Vocoder_MatchExcitationEnergy turned out to
+ * want it too - two of the codec's three energy measurements are this same
+ * function, called with the same array twice.  It is verified where it always
+ * was, through test_unvoiced's 206 firmware calls.
+ *
+ * The accumulation is 64-bit, the doubling is the Q15 fractional convention,
+ * and the result comes back as a 32-bit mantissa with the shift that produced
+ * it: value = mant * 2^exp.  Its one caller passes the same array twice, so
+ * in practice this is a band's energy - but it is transcribed as the dot
+ * product it is.
+ *
+ * The normalisation is the stock code's one's-complement trick: a negative
+ * accumulator is complemented rather than negated before the leading-zero
+ * count, which is off by one LSB and is what the radio does.
+ */
+int32_t ambe_dot_norm(int16_t *exp_out, const int16_t *a, const int16_t *b,
+                           int n)
+{
+    int64_t acc = 0;
+    uint32_t lo, hi, mlo, mhi;
+    int i, lzc, shift;
+
+    for (i = 0; i < n; i++)
+        acc += (int64_t)a[i] * (int64_t)b[i];
+    lo = (uint32_t)acc;
+    hi = (uint32_t)((uint64_t)acc >> 32);
+    hi = (hi << 1) | (lo >> 31);            /* the 64-bit doubling, as the */
+    lo <<= 1;                               /* stock code's add-with-carry */
+
+    shift = 0;
+    if (hi != 0 || lo != 0) {
+        mhi = hi; mlo = lo;
+        if ((int32_t)hi < 0) { mhi = ~hi; mlo = ~lo; }
+        lzc = (int)ambe_lzcount32(mlo);
+        if (mhi != 0)
+            lzc = (int)ambe_lzcount32(mhi) - 32;
+        shift = lzc - 1;
+    }
+    *exp_out = (int16_t)(-shift);
+    if (shift >= 0)
+        return (int32_t)(lo << (shift & 31));
+    return (int32_t)(uint32_t)((((uint64_t)hi << 32) | lo) >> (-shift));
 }

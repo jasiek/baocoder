@@ -12,6 +12,11 @@
 
 #include <stdint.h>
 
+/* FUN_0001ABDC: twice the dot product of two int16 arrays, renormalised, as a
+   32-bit mantissa with the shift that produced it. */
+int32_t ambe_dot_norm(int16_t *exp_out, const int16_t *a, const int16_t *b,
+                      int n);
+
 /* Math_ArrayShiftCopy 0x0001AB58: copy n shorts, shifting each by `shift` -
    left when positive, arithmetic right when negative. */
 void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift);
