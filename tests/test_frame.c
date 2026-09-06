@@ -10,6 +10,7 @@
  *   Math_PopCountBits         0x000189F4   here
  *   Vocoder_SmoothPitchState  0x00022D7C   here
  *   Math_Pow2Scaled           0x00019280   here
+ *   Vocoder_NormalizeSpectralBlock 0x00022C18   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -124,6 +125,63 @@ int main(void)
         CHECK(pn > 600, "only %d scaled powers\n", pn);
         CHECK(pok == pn, "Math_Pow2Scaled exact on %d of %d\n", pok, pn);
         printf("[Math_Pow2Scaled %d/%d bit-exact] ", pok, pn);
+    }
+
+    {   /* Vocoder_NormalizeSpectralBlock: clamp, peak, exponentiate.  The
+           input is the 56-short array it rewrites in place, so the fixture
+           carries it on both sides. */
+        FILE *g = fixture_open("frame_normblock.fw");
+        int bn = 0, bok = 0, clipped = 0, empty = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t in[56], ref[56], got[56];
+            long count, refe;
+            int16_t e = 0x7BAD;
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) in[k]  = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+            refe = strtol(p, &p, 10);
+
+            memcpy(got, in, sizeof(got));
+            ambe_normalize_spectral_block(got, &e, (int)count);
+            if (e != (int16_t)refe) {
+                CHECK(0, "normblock case %d (count %ld): exponent %d, firmware %ld\n",
+                      bn, count, (int)e, refe);
+                bad = 1;
+            }
+            for (k = 0; k < 56 && !bad; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "normblock case %d (count %ld) slot %d: %d, "
+                             "firmware %d\n", bn, count, k, (int)got[k],
+                          (int)ref[k]);
+                    bad = 1;
+                }
+            if (!bad)
+                bok++;
+            for (k = 0; k < 56; k++)
+                if (in[k] > 0x77ff || in[k] < -0x77ff)
+                    clipped++;
+            if (count < 1)
+                empty++;
+            bn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(bn > 200, "only %d normalise cases\n", bn);
+        CHECK(clipped > 0, "no case has a coefficient past the 0x77FF clamp, "
+                           "which is where 0x7FFF would look identical\n");
+        CHECK(empty > 0, "no case has count < 1, the fixed -0x1E exponent path\n");
+        CHECK(bok == bn, "Vocoder_NormalizeSpectralBlock exact on %d of %d\n",
+              bok, bn);
+        printf("[Vocoder_NormalizeSpectralBlock %d/%d bit-exact, %d values past "
+               "the clamp] ", bok, bn, clipped);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

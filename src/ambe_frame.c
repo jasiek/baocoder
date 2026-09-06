@@ -16,6 +16,7 @@
  *   Vocoder_CopyFrameParamsWithReset   0x00019CBC   here
  *   Vocoder_ResetFrameBuffer           0x00019D38   here
  *   Vocoder_SmoothPitchState           0x00022D7C   here
+ *   Vocoder_NormalizeSpectralBlock     0x00022C18   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -188,4 +189,58 @@ uint32_t ambe_smooth_pitch_state(uint32_t state, uint16_t target, uint32_t vuv)
 
     return (uint32_t)(ambe_asr_hw((int32_t)(int16_t)target * 0x6666 * 2, 3)
                       + (int32_t)(int16_t)state * 0x7333 * 2) >> 16;
+}
+
+/*
+ * Vocoder_NormalizeSpectralBlock 0x00022C18.
+ *
+ * Clamp, find the peak, exponentiate everything against it, and write the
+ * common exponent out - the block float the synthesisers are handed their
+ * amplitudes in.  Three passes over the same array in the stock code and three
+ * here, because they are not fusable: the peak of the CLAMPED values is what
+ * sets the exponent, and every element is then scaled by it.
+ *
+ *   the clamp is +/-0x77FF, not +/-0x7FFF.  It leaves two bits of headroom
+ *   below saturation, which is what keeps the Math_Pow2Scaled call below from
+ *   overflowing on a full-scale amplitude;
+ *
+ *   the peak is taken over `value << 16` as a SIGNED comparison seeded at
+ *   INT32_MIN, so a block that is entirely negative still finds its largest;
+ *
+ *   the exponent is `((peak >> 11) + 0x10000) >> 16`, and the values are then
+ *   Math_Pow2Scaled(value, 4, that) - an exponentiation, not a shift, because
+ *   the amplitudes are logarithmic at this point and become linear here.
+ *
+ * The tail from `count` to 0x38 is zeroed whatever happens, including on the
+ * empty-block path where the exponent is the fixed -0x1E.
+ */
+void ambe_normalize_spectral_block(int16_t *coeffs, int16_t *exp_out, int count)
+{
+    int32_t peak = INT32_MIN;
+    int16_t e;
+    int i, n;
+
+    if (count < 1) {
+        e = -0x1e;
+    } else {
+        n = (int)((((uint32_t)(uint16_t)count - 1) & 0xffff) + 1);
+        for (i = 0; i < n; i++) {
+            if (coeffs[i] < -0x77ff)
+                coeffs[i] = -0x77ff;
+            if (coeffs[i] > 0x77ff)
+                coeffs[i] = 0x77ff;
+        }
+        for (i = 0; i < n; i++) {
+            int32_t v = (int32_t)((uint32_t)(uint16_t)coeffs[i] << 16);
+
+            if (peak < v)
+                peak = v;
+        }
+        e = (int16_t)((uint32_t)(ambe_asr_hw(peak, 11) + 0x10000) >> 16);
+        for (i = 0; i < count; i++)
+            coeffs[i] = (int16_t)ambe_pow2_scaled(coeffs[i], 4, e);
+        e = (int16_t)(e - 0xf);
+    }
+    *exp_out = e;
+    memset(coeffs + count, 0, (size_t)(int16_t)(0x38 - count) * sizeof(int16_t));
 }

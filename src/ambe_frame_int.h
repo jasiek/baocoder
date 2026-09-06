@@ -19,6 +19,11 @@ int ambe_popcount_bits(uint32_t x, int n);
    more than seven bands are voiced. */
 uint32_t ambe_smooth_pitch_state(uint32_t state, uint16_t target, uint32_t vuv);
 
+/* Vocoder_NormalizeSpectralBlock 0x00022C18: clamp, peak, exponentiate, and
+   write the block float's common exponent.  `coeffs` is 0x38 shorts; the tail
+   past `count` is zeroed. */
+void ambe_normalize_spectral_block(int16_t *coeffs, int16_t *exp_out, int count);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

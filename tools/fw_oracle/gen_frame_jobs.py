@@ -23,6 +23,9 @@ import emu
 POPCOUNT = 0x000189F4
 SMOOTH   = 0x00022D7C
 POW2SC   = 0x00019280
+NORMBLK  = 0x00022C18
+BLK      = 0x00051000
+EXPO     = 0x00051100
 
 
 def _popcount_cases():
@@ -94,6 +97,39 @@ def _pow2_scaled_cases():
     return out
 
 
+def _normblk_cases():
+    """(count, 0x38 coefficients).
+
+    The clamp is +/-0x77FF rather than +/-0x7FFF, so values either side of it
+    are what say whether a transcription used the right bound; the peak search
+    is signed and seeded at INT32_MIN, so an all-negative block is what says it
+    is not seeded at zero; and count < 1 is the fixed-exponent path.
+    """
+    out = []
+    def blk(f):
+        return [f(i) for i in range(0x38)]
+    out.append((0, blk(lambda i: 0)))
+    out.append((-1, blk(lambda i: 100)))
+    out.append((1, blk(lambda i: 0x7FFF)))
+    out.append((0x38, blk(lambda i: 0x77FF)))
+    out.append((0x38, blk(lambda i: 0x7800)))       # just over the clamp
+    out.append((0x38, blk(lambda i: -0x7800)))
+    out.append((0x38, blk(lambda i: -0x7FFF)))      # entirely negative
+    out.append((0x38, blk(lambda i: 0)))
+    for L in (1, 2, 8, 16, 32, 0x37, 0x38):
+        out.append((L, blk(lambda i: (i * 617) % 0xFFFF - 0x8000)))
+        out.append((L, blk(lambda i: 0x4000 - i * 0x100)))
+    x = 8642
+    for _ in range(200):
+        vals = []
+        for _ in range(0x38):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            vals.append(((x >> 7) & 0xFFFF) - 0x8000)
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append((1 + (x >> 7) % 0x38, vals))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -105,6 +141,12 @@ def gen(jobfile):
     for m, e, q in _pow2_scaled_cases():
         j.call(POW2SC, m & 0xFFFFFFFF, e & 0xFFFFFFFF, q & 0xFFFFFFFF)
         j.getreg("r0")
+    for i, (count, vals) in enumerate(_normblk_cases()):
+        j.poke(BLK,  struct.pack("<56h", *vals))
+        j.poke(EXPO, b"\xEE\xEE")
+        j.call(NORMBLK, BLK, EXPO, count & 0xFFFFFFFF)
+        j.peek("nb%d" % i, BLK, 56 * 2)
+        j.peek("ne%d" % i, EXPO, 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -147,6 +189,21 @@ def export(outfile, destdir):
         for mm, e, q in _pow2_scaled_cases():
             fh.write("%d %d %d %u\n" % (mm, e, q, r0[k]))
             k += 1
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_normblock.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_NormalizeSpectralBlock 0x00022C18, executed under the\n"
+                 "# p-code emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count, 56 coefficients in, 56 out, then the common\n"
+                 "# exponent it wrote.\n")
+        m = 0
+        for i, (count, vals) in enumerate(_normblk_cases()):
+            o = struct.unpack("<56h", res["peek"]["nb%d" % i][0])
+            e = struct.unpack("<h", res["peek"]["ne%d" % i][0])[0]
+            fh.write("%d %s %s %d\n" % (count, " ".join(map(str, vals)),
+                                         " ".join(map(str, o)), e))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
