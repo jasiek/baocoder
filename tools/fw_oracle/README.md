@@ -224,6 +224,45 @@ builds for `Vocoder_SynthesizeVoiced`'s `pPrev[0x40]` and `src/ambe_voiced.c`
 does not read; the copy into the silence slot at ctx+0x4f8, which nothing reads
 back; and the zero fill of ctx+0x172 on a non-voice frame.
 
+## Building the frames a corpus does not contain
+
+`gen_tone_jobs.py` calls `Vocoder_SynthesizeFrame 0x00019DB8` directly on tone
+frames it constructs, because `pFrameParams[1]` is `0xFF` on all 617 calls of
+the capture - every frame of the corpus is speech or silence - so the
+function's tone branch has no natural coverage whatsoever.
+
+```sh
+python3 tools/fw_oracle/gen_tone_jobs.py /tmp/tone.job
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/tone.job /tmp/tone.out
+python3 tools/fw_oracle/gen_tone_jobs.py --export /tmp/tone.out \
+        tests/fixtures/frame_tone.fw
+```
+
+The channel state comes out of `tests/fixtures/dm32_arc4_1.fwframe`'s own `S`
+line, so the job is reproducible from this repository plus the emulator rather
+than from a scratch capture. Two breaks, both on the unconditional path so
+neither can fail to fire: `0x00019E26`, after the two
+`Vocoder_ResetFrameBuffer` calls and before the tone test, which is the block
+**as the branch sees it** - the preprocessing above has already rewritten it -
+and `0x00019EAA`, where every path joins to synthesise.
+
+And the job stops at the second one rather than resuming to the return. That is
+not tidiness: run these frames on into the synthesiser and 467 of 616 die on a
+divide by zero at `0x00018F14`, the same fault the voiced capture hit, because
+they are built for the tone branch and not for the synthesiser below it.
+`doCall` resets `sp`, `lr` and `pc`, so the next case simply starts.
+
+Mutation says the fixture reaches the branch: the notch factor `0x51E` leaves
+842 of 1 044, notching the tone bins as well 450, the DCS merge range 1 030,
+the walk-up loop's step 906 and its start 930, and handing the index over
+without its `-1` 686. Two things it does not separate, and both are recorded
+rather than presented otherwise: whether the `abs` is a true negation or a
+saturating one, which differs only at `-0x8000` and the indices are under
+`0x38`; and, in the first version of the case set, the early path's two gates -
+`|params[3] - prev[3]| < 2` widened to 3 and `(prev[3] + 1) * 16` halved both
+left it at 616 of 616, because no combination of the grid's indices differs by
+exactly two or puts a code in the halved window. Cases were added for both.
+
 ## The voiced synthesiser
 
 `Vocoder_SynthesizeVoiced 0x0001DE10` is the one stage of the codec with no

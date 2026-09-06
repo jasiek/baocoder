@@ -18,7 +18,7 @@ same frames; no code or data from either ships in the library.
 
 ```
 make          # libbaocoder.a + the ambe_decode / ambe_encode CLIs
-make test     # 1 190 296 checks against the radio's own decoder, plus the integer-only check
+make test     # 1 190 301 checks against the radio's own decoder, plus the integer-only check
 make fixtures # regenerate tests/fixtures from upstream (needs network)
 make tables   # re-extract the quantiser tables from the firmware image
 ```
@@ -320,6 +320,7 @@ it, not the arithmetic below.
 | `Vocoder_ResetFrameBuffer` `0x00019D38` | 260 |
 | `Tone_ClassifyCtcssDcsCode` `0x0001A434` | 675 |
 | `Tone_CtcssDcsCodeToTableIndex` `0x0001A478` | 595 |
+| the tone branch of `Vocoder_SynthesizeFrame` | 1 044 |
 
   alongside `Math_SqrtScaled` `0x000193E0` (711 of 711, swept in
   `test_basop_firmware`), `Vocoder_CopyFrameParamsWithReset` `0x00019CBC` and
@@ -345,12 +346,26 @@ it, not the arithmetic below.
   `Tone_ClassifyCtcssDcsCode 0x0001A434` and
   `Tone_CtcssDcsCodeToTableIndex 0x0001A478`, and they are **66 and 74 bytes**.
   Both are now transcribed and swept — 675 and 595 cases, every one of the
-  classifier's five families and every DCS code it can produce — which closes
-  the tone branch of `Vocoder_ResetFrameBuffer 0x00019D38` (swept in turn, 260
-  cases, of which 118 are tone frames the corpus does not contain at all).
+  classifier's five families and every DCS code it can produce — and with them
+  the two tone branches close: `Vocoder_ResetFrameBuffer 0x00019D38`'s (swept
+  in turn, 260 cases) and `Vocoder_SynthesizeFrame`'s own, which is **1 044
+  constructed frames, bit-exact**. Neither has any natural coverage at all —
+  `pFrameParams[1]` is `0xFF` on all 617 calls of the capture, so every frame
+  of the corpus is speech or silence — so both fixtures are built rather than
+  captured, the way `test_voiced`'s octave-repair calls are.
+
+  What that branch does: on a **continuation** frame, ctx+0x7a0 == 1, a CTCSS
+  tone whose previous frame was also CTCSS has its harmonic index recomputed —
+  kept if it moved by less than two and still fits, otherwise
+  `(prev[3] + 1)·code / prev[1]` walked up in steps of 16 until it passes the
+  code. Otherwise it **shapes**: every harmonic that is not one of the tone's
+  own bins is multiplied by `0x51E` doubled, a 28 dB notch of everything around
+  the tone; a DCS code replaces both bins of its pair with the root of the sum
+  of their squares; and codes `0x14..0x16` get their pitch recomputed.
+
   What is still missing on the tone side is `Tone_InitCtcssDcsParams
-  0x0001A5C0`, 920 bytes, and the tone path inside `Vocoder_SynthesizeFrame`
-  itself.
+  0x0001A5C0`, 920 bytes, which `Vocoder_ProcessFrameSignaling` calls — one
+  level up, not here.
 * **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is implemented and exact, but
   unwired** — `src/ambe_blend.c`, bit-exact on pitch, `L` and envelope over
   **232 firmware calls** (`test_blend`). So are `Vocoder_SynthesizeUnvoiced`
@@ -449,7 +464,7 @@ decoder, executed:
 | `test_blend` | `Vocoder_ResampleSpectralEnvelope 0x00026A84`, the two-frame interpolation the synthesiser is handed for the first half of every frame, captured *inside* the function at the one instant where the output and both scratch arrays are live together | 5 checks; **232 calls, bit-exact** on pitch, `L` and envelope; branches 148 current / 31 previous / 53 geometric mean |
 | `test_unvoiced` | `Vocoder_SynthesizeUnvoiced 0x0001AFE0` against the firmware **called directly**, stage by stage: noise generator, windowed segment, voicing flags, shaped spectrum, samples and state | 8 checks; **206 calls, all bit-exact** — 16 480 generated values, 11 536 voicing flags, 412 buffers of 256, 16 480 samples |
 | `test_voiced` | `Vocoder_SynthesizeVoiced 0x0001DE10`'s stages, innermost outwards, each swept against the firmware on its own before the next is written. `Vocoder_SynthesizeVoiced` `0x0001DE10` and all three of its helpers, each swept against the firmware on its own before the one above it was written | 1 603 checks; the helpers **1 584 + 417 + 900** cases and the function itself **617** firmware calls — accumulator and all 556 shorts of state — plus **240** constructed calls for the octave-repair branches real speech never reaches, **all bit-exact**. Every sweep is mutation-tested rather than trusted: breaking the bin numbering leaves 12 of 417 passing, the phase fold 195, the interpolator's window 262 of 900, the phase-per-harmonic 316 of 617. The constructed cases earned their keep — they caught an arithmetic shift written as a logical one, which no real frame reaches |
-| `test_frame` | the frame-synthesis layer under `Vocoder_SynthesizeFrame 0x00019DB8`: ten functions, each swept against the firmware executed before the one above it was written. The largest of them, `Vocoder_MatchExcitationEnergy 0x000277F8`, is checked on all three of the things it rewrites in place — the amplitudes, the block exponent and the caller's reference energy — because nothing inside it reads the reference pair it maintains, so a transcription could get that wrong and still sound right | 671 checks; **6 843 swept cases** — 480 + 720 + 711 + 222 + 700 + 356 + 255 + 248 + 266 + 355 + 260 + 675 + 595 — plus `Vocoder_SynthesizeFrame` as a sequence: **617 consecutive calls, 49 360 samples**, cold from the state at the first one, all bit-exact on the samples, the block and the state. Every sweep is mutation-tested rather than trusted: moving the excitation match's unenhanced low band from L/8 to L/4 leaves 116 of 355 passing and dropping its one saturation exactly the 15 cases constructed to reach it; on the sequence, moving the high-frequency tilt's corner leaves **0 of 617**, flattening the block onto the smallest exponent instead of the largest 1, and halving the ramp's reciprocal 227 |
+| `test_frame` | the frame-synthesis layer under `Vocoder_SynthesizeFrame 0x00019DB8`: ten functions, each swept against the firmware executed before the one above it was written. The largest of them, `Vocoder_MatchExcitationEnergy 0x000277F8`, is checked on all three of the things it rewrites in place — the amplitudes, the block exponent and the caller's reference energy — because nothing inside it reads the reference pair it maintains, so a transcription could get that wrong and still sound right | 676 checks; **7 887 swept and constructed cases** — 480 + 720 + 711 + 222 + 700 + 356 + 255 + 248 + 266 + 355 + 260 + 675 + 595 + 1 044 — plus `Vocoder_SynthesizeFrame` as a sequence: **617 consecutive calls, 49 360 samples**, cold from the state at the first one, all bit-exact on the samples, the block and the state. Every sweep is mutation-tested rather than trusted: moving the excitation match's unenhanced low band from L/8 to L/4 leaves 116 of 355 passing and dropping its one saturation exactly the 15 cases constructed to reach it; on the sequence, moving the high-frequency tilt's corner leaves **0 of 617**, flattening the block onto the smallest exponent instead of the largest 1, and halving the ramp's reciprocal 227 |
 | `test_postfilter` | `FUN_00018a2c`, the output filter, twice over: given the radio's own state, and then carrying its own across calls — a filter can pass the first and fail the second, and the second is how it is used. The final scaling to int16 alongside | 4 checks; **205 calls, 16 400 samples, all bit-exact** |
 | `test_mbelib` | how well mbelib decodes the same frames, given the radio is the definition | 10 614 checks; `w0` 3.1e-6, `L` 242/242, voicing **10 006/10 006** exact; predictor state **4.3%** on gain and **12.9%** on amplitudes apart |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.973**, worst 0.831; mbelib on the same reference 0.969 |

@@ -973,16 +973,9 @@ void ambe_match_excitation_energy(int16_t *amps, int16_t *exp_io,
  * to int16 - and last the block is copied into ctx+0x470 to be the next
  * frame's previous.
  *
- * Two things are here and not implemented, both explicit rather than guessed.
+ * The TONE path, pFrameParams[1] != 0xFF, is ambe_frame_tone_rewrite below.
  *
- * The TONE path, pFrameParams[1] != 0xFF, needs Tone_ClassifyCtcssDcsCode
- * 0x0002B0F4 and Tone_CtcssDcsCodeToTableIndex, neither of which this project
- * transcribes; it is the same gap ambe_frame_reset_buffer already has, and the
- * same justification - the corpus holds two tone frames in 2052 and the decoder
- * mutes them.  A tone frame reaches synthesis here with its block untouched by
- * that path, which is not what the radio does.
- *
- * And the ramp walks the amplitude array with no bound of its own: what stops
+ * The ramp walks the amplitude array with no bound of its own: what stops
  * it is the pitch, one harmonic per iteration until k*pitch reaches the clamp.
  * A pitch small enough to run past the block would have the stock code writing
  * over its own fields, and a pitch of zero would hang it, neither of which a
@@ -1052,9 +1045,7 @@ void ambe_frame_synthesize(int16_t *params, int16_t *pcm, int n, int repeat,
     (void)prev_voi;
 
     if ((int16_t)params[1] != 0xff) {
-        /* the tone path; see the comment above.  It rewrites the block from
-           the tone tables and then joins the synthesis below, which is what
-           happens here minus the rewriting. */
+        ambe_frame_tone_rewrite(params, st->prev, st->tone_mode, voi);
     } else {
         int16_t sp, clamp, ed, md, ee, v;
         uint16_t q;
@@ -1256,4 +1247,92 @@ int16_t ambe_tone_bin(int cls, uint16_t code, int16_t flag)
     if ((unsigned)cls < 4)
         return (int16_t)(ambe_dcs_bins[((int16_t)code - 0x80) * 2 + flag] - 1);
     return 0;
+}
+
+/*
+ * The tone branch of Vocoder_SynthesizeFrame 0x00019DB8, which runs instead of
+ * the two frequency tilts whenever pFrameParams[1] is not 0xFF - that is,
+ * whenever the frame carries a tone code rather than speech.  It is two
+ * different things chosen by ctx+0x7a0, and neither is reachable from this
+ * corpus: pFrameParams[1] is 0xFF on all 617 calls of it.
+ *
+ * ctx+0x7a0 == 1 is tone CONTINUATION.  A CTCSS tone whose previous frame was
+ * also a CTCSS tone gets its harmonic index recomputed rather than taken from
+ * the block: if the index moved by less than two and the code still fits under
+ * the old index, the old index is kept; otherwise the index is
+ * `(prev[3] + 1) * code / prev[1]`, rounded by adding half the divisor, and
+ * then walked up in steps of 16 until it passes the code.  Either way
+ * Vocoder_UpdatePitchHistoryBuffer moves the amplitude and recomputes the
+ * pitch that follows from where it now sits.
+ *
+ * Anything else is tone SHAPING.  Every harmonic that is not one of the tone's
+ * own bins is multiplied by 0x51E doubled - 0.04, a 28 dB notch of everything
+ * around the tone - and then two corrections: a DCS code, 0x80..0x9F, replaces
+ * both bins of its pair with the root of the sum of their squares, so a pair
+ * carries the energy of the pair rather than of each half; and codes 0x14..0x16
+ * get their pitch recomputed as `Math_SDivHalf(code << 20, (params[3] + 1) *
+ * 0x100)`, which is three codes out of the 118 CTCSS ones and I have no reading
+ * of why those three.
+ *
+ * The `& 0x20` on the DCS test is worth a line: it covers 0x80..0x9F, which is
+ * the classifier's families 1 and 2 but NOT family 3 at 0xA0..0xA3.  Family 3
+ * gets bins out of the table like a DCS pair and is not merged like one.
+ */
+void ambe_frame_tone_rewrite(int16_t *params, const int16_t *prev,
+                             int16_t tone_mode, uint16_t *flags)
+{
+    uint16_t code = (uint16_t)params[1];
+
+    if (tone_mode == 1) {
+        int16_t idx, d;
+        int32_t q, t;
+
+        if (ambe_tone_class(params[1]) != 0 || prev[0] != 3
+            || ambe_tone_class(prev[1]) != 0)
+            return;
+        idx = prev[3];
+        d   = (int16_t)(params[3] - idx);
+        if (d < 0)
+            d = (int16_t)(~d + 1);          /* `abs`, and it is a true one */
+        if (d < 2 && (int16_t)code < (int16_t)((idx + 1) * 0x10)) {
+            ambe_update_pitch_history(params, flags, idx);
+            return;
+        }
+        /* + prev[1]/2 is the rounding, and it is C's /2 - toward zero */
+        q = ambe_sdiv((int32_t)(idx + 1) * (int32_t)(int16_t)code
+                      + (int32_t)prev[1] / 2, prev[1]);
+        q = (int16_t)(uint16_t)q;
+        for (t = (int32_t)(int16_t)q * 16; t <= (int32_t)(int16_t)code;
+             t += 0x10)
+            q = (int16_t)(uint16_t)(q + 1);
+        ambe_update_pitch_history(params, flags, (int16_t)(q - 1));
+        return;
+    }
+
+    {
+        int cls    = ambe_tone_class(params[1]);
+        int16_t b0 = ambe_tone_bin(cls, code, 0);
+        int16_t b1 = ambe_tone_bin(cls, code, 1);
+        int16_t L  = params[2];
+        int16_t i;
+
+        for (i = 0; i < L; i = (int16_t)(i + 1))
+            if (b0 != i && b1 != i)
+                params[8 + i] = (int16_t)ambe_asr_hw(
+                    (int32_t)((uint32_t)((int32_t)params[8 + i] * 0x51e) * 2u),
+                    16);
+        if ((uint16_t)(code - 0x80) < 0x20) {
+            uint32_t sum = (uint32_t)((int32_t)params[8 + b0]
+                                      * (int32_t)params[8 + b0])
+                         + (uint32_t)((int32_t)params[8 + b1]
+                                      * (int32_t)params[8 + b1]);
+            int16_t root = (int16_t)ambe_sqrt_scaled((int32_t)sum, 8, 4);
+
+            params[8 + b1] = root;
+            params[8 + b0] = root;
+        }
+        if ((uint16_t)(code - 0x14) < 3)
+            params[6] = (int16_t)ambe_sdiv_half(
+                ambe_shl32((int32_t)code, 20), (int16_t)((params[3] + 1) * 0x100));
+    }
 }

@@ -75,6 +75,15 @@ int ambe_tone_class(int16_t code);
  */
 int16_t ambe_tone_bin(int cls, uint16_t code, int16_t flag);
 
+/*
+ * The tone branch of Vocoder_SynthesizeFrame 0x00019DB8, factored out so it
+ * can be swept: the corpus holds no tone frame, so the only way to reach it is
+ * to build the calls.  `prev` is the previous frame's block at ctx+0x470 and
+ * `tone_mode` is ctx+0x7a0, which selects between the two halves of it.
+ */
+void ambe_frame_tone_rewrite(int16_t *params, const int16_t *prev,
+                             int16_t tone_mode, uint16_t *flags);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

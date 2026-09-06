@@ -19,6 +19,7 @@
  *   Vocoder_MatchExcitationEnergy 0x000277F8  here
  *   Vocoder_SynthesizeFrame   0x00019DB8   here, as a sequence
  *   Vocoder_ResetFrameBuffer  0x00019D38   here
+ *   the tone branch of Vocoder_SynthesizeFrame, on constructed frames
  *   Tone_ClassifyCtcssDcsCode 0x0001A434   here
  *   Tone_CtcssDcsCodeToTableIndex 0x0001A478 here
  *
@@ -823,6 +824,74 @@ int main(void)
         printf("[Vocoder_ResetFrameBuffer %d/%d bit-exact, %d tone frames of "
                "which %d DCS pairs, %d left untouched] ", rok, rn, tone, pair,
                untouched);
+    }
+
+    {   /* the tone branch of Vocoder_SynthesizeFrame, on frames built for it.
+           pFrameParams[1] is 0xFF on all 617 calls of the capture - every
+           frame of the corpus is speech or silence - so this branch has no
+           natural coverage at all, and the fixture is 616 constructed calls
+           caught either side of it inside the running function. */
+        FILE *g = fixture_open("frame_tone.fw");
+        static int16_t prv[68], pre[68], ref[68], got[68];
+        uint16_t flg[0x38];
+        int tn = 0, tok = 0, cont = 0, shape = 0, notch = 0, merged = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            char *p = line;
+            long mode;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            mode = strtol(p, &p, 10);
+            for (k = 0; k < 68; k++) prv[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 68; k++) pre[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 68; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+
+            memcpy(got, pre, sizeof got);
+            for (k = 0; k < 0x38; k++)
+                flg[k] = 0;
+            ambe_frame_tone_rewrite(got, prv, (int16_t)mode, flg);
+            for (k = 0; k < 68; k++)
+                if (got[k] != ref[k]) {
+                    if (tn - tok < 3)
+                        CHECK(0, "tone case %d (mode %ld code %d prev %d/%d) "
+                                 "field %d: %d, firmware %d\n", tn, mode,
+                              (int)pre[1], (int)prv[0], (int)prv[1], k,
+                              (int)got[k], (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                tok++;
+            if (mode == 1)
+                cont++;
+            else
+                shape++;
+            for (k = 0; k < 0x38; k++)
+                if (ref[8 + k] != pre[8 + k])
+                    notch++;
+            if (mode != 1 && (uint16_t)(pre[1] - 0x80) < 0x20
+                && ref[8 + 0x05] == ref[8 + 0x08] && ref[8 + 0x05] != 0)
+                merged++;
+            tn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(tn > 500, "only %d constructed tone frames\n", tn);
+        CHECK(cont > 100 && shape > 100,
+              "%d continuation and %d shaping cases: they are two different "
+              "branches and both need reaching\n", cont, shape);
+        CHECK(notch > 1000, "only %d amplitudes moved, so the notch is barely "
+                            "exercised\n", notch);
+        CHECK(merged > 10, "only %d DCS pairs merged to their common root\n",
+              merged);
+        CHECK(tok == tn, "the tone branch exact on %d of %d\n", tok, tn);
+        printf("[the tone branch %d/%d constructed frames bit-exact, %d "
+               "continuation and %d shaping, %d amplitudes notched] ",
+               tok, tn, cont, shape, notch);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);
