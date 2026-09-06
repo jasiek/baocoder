@@ -24,6 +24,11 @@ uint32_t ambe_smooth_pitch_state(uint32_t state, uint16_t target, uint32_t vuv);
    past `count` is zeroed. */
 void ambe_normalize_spectral_block(int16_t *coeffs, int16_t *exp_out, int count);
 
+/* Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8: moves the frame's pitch
+   candidate to a new index and recomputes the pitch and harmonic count that
+   follow from it.  `flags` is what params[0x40] points at. */
+void ambe_update_pitch_history(int16_t *params, uint16_t *flags, int16_t cand);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

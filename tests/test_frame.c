@@ -11,6 +11,7 @@
  *   Vocoder_SmoothPitchState  0x00022D7C   here
  *   Math_Pow2Scaled           0x00019280   here
  *   Vocoder_NormalizeSpectralBlock 0x00022C18   here
+ *   Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8 here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -182,6 +183,70 @@ int main(void)
               bok, bn);
         printf("[Vocoder_NormalizeSpectralBlock %d/%d bit-exact, %d values past "
                "the clamp] ", bok, bn, clipped);
+    }
+
+    {   /* Vocoder_UpdatePitchHistoryBuffer.  The block's [0x40..0x41] is a
+           pointer to the flags in the running firmware, so the fixture's copy
+           holds the emulator's address; this library takes the flags as an
+           argument and the two columns are compared separately. */
+        FILE *g = fixture_open("frame_pitchhist.fw");
+        int hn = 0, hok = 0, moved = 0, clamped9 = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            static int16_t b[68], ref[68];
+            static uint16_t fl[56], reff[56];
+            long cand;
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            cand = strtol(p, &p, 10);
+            for (k = 0; k < 68; k++) b[k]    = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) fl[k]   = (uint16_t)strtoul(p, &p, 10);
+            for (k = 0; k < 68; k++) ref[k]  = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) reff[k] = (uint16_t)strtoul(p, &p, 10);
+
+            if (b[3] != (int16_t)cand)
+                moved++;
+            if (ref[2] == 9)
+                clamped9++;
+
+            ambe_update_pitch_history(b, fl, (int16_t)cand);
+
+            for (k = 0; k < 68; k++) {
+                if (k == 0x40 || k == 0x41)
+                    continue;       /* the firmware's own flags address */
+                if (b[k] != ref[k]) {
+                    CHECK(0, "pitchhist case %d (cand %ld) slot %d: %d, "
+                             "firmware %d\n", hn, cand, k, (int)b[k],
+                          (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            }
+            for (k = 0; k < 56 && !bad; k++)
+                if (fl[k] != reff[k]) {
+                    CHECK(0, "pitchhist case %d (cand %ld) flag %d: %u, "
+                             "firmware %u\n", hn, cand, k, (unsigned)fl[k],
+                          (unsigned)reff[k]);
+                    bad = 1;
+                }
+            if (!bad)
+                hok++;
+            hn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(hn > 600, "only %d pitch-history cases\n", hn);
+        CHECK(moved > 0, "no case moves the candidate to a different index\n");
+        CHECK(clamped9 > 0, "no case lands on the nine-harmonic floor\n");
+        CHECK(hok == hn, "Vocoder_UpdatePitchHistoryBuffer exact on %d of %d\n",
+              hok, hn);
+        printf("[Vocoder_UpdatePitchHistoryBuffer %d/%d bit-exact, %d moving the "
+               "candidate] ", hok, hn, moved);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

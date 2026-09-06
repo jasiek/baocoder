@@ -17,6 +17,7 @@
  *   Vocoder_ResetFrameBuffer           0x00019D38   here
  *   Vocoder_SmoothPitchState           0x00022D7C   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   here
+ *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -243,4 +244,75 @@ void ambe_normalize_spectral_block(int16_t *coeffs, int16_t *exp_out, int count)
     }
     *exp_out = e;
     memset(coeffs + count, 0, (size_t)(int16_t)(0x38 - count) * sizeof(int16_t));
+}
+
+/*
+ * Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8.
+ *
+ * Moves the frame's single pitch candidate from wherever it was to a new index,
+ * and recomputes the two things that depend on where it sits.  Despite the
+ * name nothing is a history buffer: the block holds one amplitude per possible
+ * harmonic at [8 + i] and one flag per harmonic in the array [0x40] points at,
+ * and this carries one entry across.
+ *
+ *   the amplitude at the old index is moved, not copied - the old slot is
+ *   zeroed first and the old flag cleared, so a candidate that does not move
+ *   still ends up zeroed and then rewritten;
+ *
+ *   [6] becomes params[1] / (index + 1) as a block float scaled by the returned
+ *   exponent plus four - the pitch implied by the new index;
+ *
+ *   [2], the harmonic count, is raised to index + 1 if the index has outgrown
+ *   it and then clamped to [9, 0x38].  The lower bound is not a sanity check:
+ *   nine harmonics is what the synthesiser below assumes it has.
+ */
+void ambe_update_pitch_history(int16_t *params, uint16_t *flags, int16_t cand)
+{
+    int16_t old = params[3];
+    int16_t amp = params[8 + old];
+    uint32_t num, den;
+    int16_t ne, de, oe, L;
+    uint16_t q;
+    int32_t v;
+    int sh;
+
+    params[8 + old]  = 0;
+    flags[old]       = 0;
+    params[8 + cand] = amp;
+    params[3]        = cand;
+    flags[cand]      = 1;
+
+    num = (uint32_t)(uint16_t)params[1] << 16;
+    if ((uint16_t)params[1] == 0) {
+        ne  = 0xf;
+        num = 0;
+    } else {
+        sh  = ambe_nsh((int32_t)num);
+        ne  = (int16_t)(0xf - sh);
+        num = (uint32_t)ambe_lsl_hw((int32_t)num, sh);
+    }
+
+    den = (uint32_t)(((uint16_t)params[3] + 1) * 0x10000);
+    if (den == 0) {
+        de = 0x17;
+        sh = 0;
+    } else {
+        sh = ambe_nsh((int32_t)den);
+        de = (int16_t)(0x17 - sh);
+    }
+
+    q  = ambe_float_div_exp((int32_t)num, ne, ambe_nhi((int32_t)den, sh), de, &oe);
+    sh = (int16_t)(oe + 4);
+    v  = sh < 0 ? ambe_asr_hw(ambe_shl32((int32_t)(int16_t)q, 16), -sh)
+                : ambe_lsl_hw(ambe_shl32((int32_t)(int16_t)q, 16), sh);
+    params[6] = (int16_t)((uint32_t)v >> 16);
+
+    L = params[2];
+    if (L <= params[3])
+        L = (int16_t)(params[3] + 1);
+    if (L < 9)
+        L = 9;
+    if (L > 0x38)
+        L = 0x38;
+    params[2] = L;
 }

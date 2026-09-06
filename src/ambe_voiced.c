@@ -29,27 +29,6 @@
 #include "ambe_tables.h"
 #include "ambe_voiced_int.h"
 
-/*
- * The two halves of the normalise-and-take-the-high-half idiom the stock code
- * repeats at every step: count the leading redundant sign bits, shift them out,
- * keep the top 16.  `ff1` on the complement when negative, at 0x0001D7C4 and
- * everywhere like it, is what keeps the sign bit and the bit below it distinct.
- *
- * nsh(0) is 0 rather than 31: the stock code branches around the shift for a
- * zero operand and leaves the register holding zero either way.
- */
-static int nsh(int32_t v)
-{
-    if (v == 0)
-        return 0;
-    return (int)ambe_lzcount32((uint32_t)(v < 0 ? ~v : v)) - 1;
-}
-
-static int16_t nhi(int32_t v, int sh)
-{
-    return (int16_t)((uint32_t)ambe_shl32(v, sh) >> 16);
-}
-
 /* The shift amounts the machine masks to six bits, as in ambe_basop.c.  The
    clamp below scales by an exponent difference that is not bounded by anything,
    so both directions can exceed 31. */
@@ -96,13 +75,13 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
         if (t == 0) {
             e_t = 0x1f;
         } else {
-            sh = nsh(t);
+            sh = ambe_nsh(t);
             e_t = 0x1f - sh;
-            t = (int32_t)(int16_t)n * nhi(t, sh) * 2;
+            t = (int32_t)(int16_t)n * ambe_nhi(t, sh) * 2;
             if (t != 0) {
-                sh = nsh(t);
+                sh = ambe_nsh(t);
                 e_t -= sh;
-                mt = nhi(t, sh);
+                mt = ambe_nhi(t, sh);
             }
         }
 
@@ -111,30 +90,30 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
             e_p = 0x16;
             m1 = 0;
         } else {
-            sh = nsh(pp);
+            sh = ambe_nsh(pp);
             e_p = 0x16 - sh;
-            m1 = nhi(pp, sh);
+            m1 = ambe_nhi(pp, sh);
         }
         if (nn == 0) {
             /* 0x0001D982.  n is the only way here and the term is then zero
                too, so this adds nothing - it is transcribed rather than dropped
                because the stock code computes it. */
             e_p += (int16_t)((int16_t)n * (int16_t)n) * -2;
-            prod = (int32_t)m1 * nhi(nn, 0);
+            prod = (int32_t)m1 * ambe_nhi(nn, 0);
         } else {
-            sh = nsh(nn);
+            sh = ambe_nsh(nn);
             e_p -= sh;
-            prod = (int32_t)m1 * nhi(nn, sh);
+            prod = (int32_t)m1 * ambe_nhi(nn, sh);
         }
 
         v = prod * 2;
-        sh = nsh(v);
+        sh = ambe_nsh(v);
         e1 = e_p - sh;
-        m1 = nhi(v, sh);
+        m1 = ambe_nhi(v, sh);
 
         u = (int32_t)mt * pitch_delta * 2;
-        sh = nsh(u);
-        m2 = nhi(u, sh);
+        sh = ambe_nsh(u);
+        m2 = ambe_nhi(u, sh);
         e2 = (e_t - 4) - sh;
 
         {   /* the exponent is read and written through the same short */
@@ -144,17 +123,17 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
                code runs ff1 over the whole register at 0x0001D8C0, not over a
                16-bit truncation of it */
             root = (int32_t)ambe_float_sqrt(ambe_shl32((int32_t)sum, 16), &e);
-            sh = nsh(root);
+            sh = ambe_nsh(root);
             e1 = e - sh;
-            mq = nhi(root, sh);
+            mq = ambe_nhi(root, sh);
 
             if (pn == 0) {
                 e2 = 0xb;
                 m2 = 0;
             } else {
-                sh = nsh(pn);
+                sh = ambe_nsh(pn);
                 e2 = 0xb - sh;
-                m2 = nhi(pn, sh);
+                m2 = ambe_nhi(pn, sh);
             }
             e = (int16_t)e1;
             sum = (int16_t)ambe_float_add(m2, e2, (uint16_t)mq, e1, &e);
@@ -178,9 +157,9 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
                 e1 = 0xf;
                 g = 0;
             } else {
-                sh = nsh(n_hi);
+                sh = ambe_nsh(n_hi);
                 e1 = 0xf - sh;
-                g = (uint16_t)nhi(n_hi, sh);
+                g = (uint16_t)ambe_nhi(n_hi, sh);
             }
         }
         gain[k - 1]  = g;
@@ -402,8 +381,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
         uint32_t v;
 
         if (pitch == 0) { pe = -4; sh = 0; }
-        else            { sh = nsh((int32_t)ph); pe = (int16_t)(-4 - sh); }
-        q = ambe_float_div_exp(0x40000000, 1, nhi((int32_t)ph, sh), pe, &e1);
+        else            { sh = ambe_nsh((int32_t)ph); pe = (int16_t)(-4 - sh); }
+        q = ambe_float_div_exp(0x40000000, 1, ambe_nhi((int32_t)ph, sh), pe, &e1);
         q = ambe_float_add(mant, exp, q, e1, &e2);
 
         sh = (int16_t)(e2 - 0xf);
@@ -517,7 +496,7 @@ static void wr32(int16_t *p, int32_t v)
    changes anything. */
 static int32_t renorm(int32_t v)
 {
-    int sh = nsh(v);
+    int sh = ambe_nsh(v);
     return ambe_asr_hw(ambe_shl32(v, sh), sh);
 }
 
@@ -579,8 +558,8 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
 
     /* 1/n, the ramp's step */
     if (n_hi == 0) { inv_e = 0xf; sh = 0; }
-    else           { sh = nsh((int32_t)n_hi); inv_e = (int16_t)(0xf - sh); }
-    inv_n = ambe_float_div_exp(0x40000000, 1, nhi((int32_t)n_hi, sh), inv_e, &inv_e);
+    else           { sh = ambe_nsh((int32_t)n_hi); inv_e = (int16_t)(0xf - sh); }
+    inv_n = ambe_float_div_exp(0x40000000, 1, ambe_nhi((int32_t)n_hi, sh), inv_e, &inv_e);
 
     if (prev_v && cur_v) {
         /* the octave-jump repair, and the average pitch the phase advances by */
@@ -658,13 +637,13 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
         if (v == 0) {
             eb = -4; sm = 0; sh = 0;
             if (pitch == 0) { ea = -4; sh = 0; }
-            else            { sh = nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
+            else            { sh = ambe_nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
         } else {
-            sh = nsh((int32_t)v);
+            sh = ambe_nsh((int32_t)v);
             eb = (int16_t)(-4 - sh);
-            sm = nhi((int32_t)v, sh);
+            sm = ambe_nhi((int32_t)v, sh);
             if (pitch == 0) { ea = -4; sh = 0; }
-            else            { sh = nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
+            else            { sh = ambe_nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
         }
         {
             int16_t oe;
@@ -686,8 +665,8 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
             int16_t ge;
 
             if (g == 0) { ge = 0xf; sh = 0; }
-            else        { sh = nsh((int32_t)g); ge = (int16_t)(0xf - sh); }
-            ambe_voiced_interp_envelope(buf, nhi((int32_t)g, sh), ge,
+            else        { sh = ambe_nsh((int32_t)g); ge = (int16_t)(0xf - sh); }
+            ambe_voiced_interp_envelope(buf, ambe_nhi((int32_t)g, sh), ge,
                                         (uint16_t)cur[6],
                                         (const uint16_t *)(st + 0xe6), st[0xe5]);
         }
@@ -712,22 +691,22 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
 
                 phase = rem;
                 if (rem == INT32_MIN) {
-                    sa = nsh(0x3fffffff);
+                    sa = ambe_nsh(0x3fffffff);
                     rem = 0x3fffffff;
                 } else {
                     /* `-iStack_368 >> 1` on a signed int: an ARITHMETIC
                        shift, and rem is positive here as often as not, so a
                        logical one differs on half the cases */
                     int32_t halfneg = (-rem) >> 1;
-                    sa = halfneg ? nsh(halfneg) : 0;
+                    sa = halfneg ? ambe_nsh(halfneg) : 0;
                     rem = halfneg;
                 }
-                sb = (uint16_t)prev[6] ? nsh((int32_t)pp) : 0;
+                sb = (uint16_t)prev[6] ? ambe_nsh((int32_t)pp) : 0;
                 {
                     int16_t oe;
                     st[0xaa] = (int16_t)ambe_float_div_exp(
                         ambe_lsl_hw(rem, sa), 0xf - sa,
-                        (uint16_t)nhi((int32_t)pp, sb), (int16_t)(-4 - sb), &oe);
+                        (uint16_t)ambe_nhi((int32_t)pp, sb), (int16_t)(-4 - sb), &oe);
                     st[0xab] = oe;
                 }
             }
@@ -812,10 +791,10 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
         return;
     }
     if (n_hi == 0) { sh = 0; i = 0xf; }
-    else           { sh = nsh((int32_t)n_hi); i = (int16_t)(0xf - sh); }
+    else           { sh = ambe_nsh((int32_t)n_hi); i = (int16_t)(0xf - sh); }
     {
         int16_t oe;
-        st[0xaa] = (int16_t)ambe_float_sub(nhi((int32_t)n_hi, sh), i,
+        st[0xaa] = (int16_t)ambe_float_sub(ambe_nhi((int32_t)n_hi, sh), i,
                                            last_g, (int16_t)last_e, &oe);
         st[0xab] = oe;
     }

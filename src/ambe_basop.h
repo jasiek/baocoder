@@ -66,6 +66,33 @@ static inline int32_t ambe_lsl_hw(int32_t v, int n)
 }
 
 /*
+ * Leading-zero count, the ff1/LZCOUNT the stock code normalises with.
+ * lzcount32(0) is 32.
+ */
+unsigned int ambe_lzcount32(unsigned int x);
+
+/*
+ * The normalise-and-take-the-high-half idiom the vocoder repeats at every
+ * block-float step: count the leading redundant sign bits, shift them out, keep
+ * the top 16.  `ff1` on the complement when negative is what keeps the sign bit
+ * and the bit below it distinct.
+ *
+ * ambe_nsh(0) is 0 rather than 31, because the stock code branches around the
+ * shift for a zero operand and leaves the register holding zero either way.
+ */
+static inline int ambe_nsh(int32_t v)
+{
+    if (v == 0)
+        return 0;
+    return (int)ambe_lzcount32((uint32_t)(v < 0 ? ~v : v)) - 1;
+}
+
+static inline int16_t ambe_nhi(int32_t v, int sh)
+{
+    return (int16_t)((uint32_t)ambe_lsl_hw(v, sh) >> 16);
+}
+
+/*
  * Signed divide, Math_SDiv 0x00018D74.  Returns 0 when |a| < |b| rather than
  * rounding, saturates the two extreme operands, and carries the sign through
  * an XOR of the inputs.
@@ -131,12 +158,6 @@ int ambe_sin_q15(int phase_q15turns);
  * series would put 2.6e-3 straight onto every spectral amplitude.
  */
 extern const int32_t ambe_half_log2_q24[57];
-
-/*
- * Leading-zero count, the ff1/LZCOUNT the stock code normalises with.
- * lzcount32(0) is 32.
- */
-unsigned int ambe_lzcount32(unsigned int x);
 
 /* ------------------------------------------- the radio's own block float */
 

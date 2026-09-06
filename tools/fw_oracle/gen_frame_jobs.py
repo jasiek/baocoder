@@ -24,6 +24,9 @@ POPCOUNT = 0x000189F4
 SMOOTH   = 0x00022D7C
 POW2SC   = 0x00019280
 NORMBLK  = 0x00022C18
+PITCHHIST = 0x0001A9E8
+PARAMS   = 0x00051200
+FLAGS    = 0x00051400
 BLK      = 0x00051000
 EXPO     = 0x00051100
 
@@ -130,6 +133,46 @@ def _normblk_cases():
     return out
 
 
+def _pitchhist_cases():
+    """(68-short parameter block, 0x38 flags, candidate index).
+
+    The block's [0x40] is a pointer to the flags, so the job pokes both and
+    repoints it.  The interesting axes are the old index against the new - equal,
+    adjacent, far apart - and a harmonic count either side of the [9, 0x38] clamp
+    the function applies to it.
+    """
+    out = []
+    x = 24242
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    def blk(idx, count, p1):
+        b = [0] * 68
+        b[1] = p1
+        b[2] = count
+        b[3] = idx
+        b[6] = 0x1079
+        for i in range(0x38):
+            b[8 + i] = ((i * 313) & 0x7FFF)
+        return b
+
+    for idx in (0, 1, 8, 0x20, 0x37):
+        for cand in (0, 1, 8, 0x20, 0x37):
+            for count in (0, 8, 9, 10, 0x37, 0x38):
+                for p1 in (0, 1, 0x1000, 0x7FFF):
+                    out.append((blk(idx, count, p1),
+                                [1 if i == idx else 0 for i in range(0x38)],
+                                cand))
+    while len(out) < 700:
+        idx, cand = rnd(0x38), rnd(0x38)
+        out.append((blk(idx, rnd(0x40), rnd(0x10000)),
+                    [rnd(2) for _ in range(0x38)], cand))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -147,6 +190,16 @@ def gen(jobfile):
         j.call(NORMBLK, BLK, EXPO, count & 0xFFFFFFFF)
         j.peek("nb%d" % i, BLK, 56 * 2)
         j.peek("ne%d" % i, EXPO, 2)
+    for i, (b, fl, cand) in enumerate(_pitchhist_cases()):
+        blk = list(b)
+        blk[0x40] = FLAGS & 0xFFFF
+        blk[0x41] = (FLAGS >> 16) & 0xFFFF
+        j.poke(PARAMS, struct.pack("<68h", *[(v + 0x10000) % 0x10000 - 0x10000
+                                             if v > 0x7FFF else v for v in blk]))
+        j.poke(FLAGS,  struct.pack("<56H", *fl))
+        j.call(PITCHHIST, PARAMS, cand & 0xFFFFFFFF)
+        j.peek("ph%d" % i, PARAMS, 68 * 2)
+        j.peek("pf%d" % i, FLAGS, 56 * 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -204,6 +257,24 @@ def export(outfile, destdir):
             e = struct.unpack("<h", res["peek"]["ne%d" % i][0])[0]
             fh.write("%d %s %s %d\n" % (count, " ".join(map(str, vals)),
                                          " ".join(map(str, o)), e))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_pitchhist.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8, executed under the\n"
+                 "# p-code emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: candidate, 68 shorts of block in, 56 flags in, then\n"
+                 "# 68 shorts out and 56 flags out.  The block's [0x40] pointer is\n"
+                 "# repointed at the poked flags before the call and is recorded as\n"
+                 "# the emulator's address, not the radio's.\n")
+        m = 0
+        for i, (b, fl, cand) in enumerate(_pitchhist_cases()):
+            o = struct.unpack("<68h", res["peek"]["ph%d" % i][0])
+            f = struct.unpack("<56H", res["peek"]["pf%d" % i][0])
+            fh.write("%d %s %s %s %s\n" % (
+                cand, " ".join(map(str, b)), " ".join(map(str, fl)),
+                " ".join(map(str, o)), " ".join(map(str, f))))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
