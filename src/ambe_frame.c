@@ -11,6 +11,7 @@
  *
  * Being written leaves-first like the voiced synthesiser was:
  *
+ *   Math_PopCountBits                  0x000189F4   here
  *   Math_SqrtScaled                    0x000193E0   here
  *   Vocoder_CopyFrameParamsWithReset   0x00019CBC   here
  *   Vocoder_ResetFrameBuffer           0x00019D38   here
@@ -139,4 +140,28 @@ void ambe_frame_reset_buffer(int16_t *params, uint16_t *flags)
     default:
         return;
     }
+}
+
+/*
+ * Math_PopCountBits 0x000189F4.
+ *
+ * The population count of the LOW `n` bits, done the way a machine with no
+ * popcount instruction does it: shift the wanted bits up so the unwanted ones
+ * fall off the top (`subu r1,r2,r1 / lsl r1,r0,r1` with r2 = 0x20), then sum
+ * four byte lookups into a 256-entry table at 0x00018A28.
+ *
+ * The table is not extracted.  A byte popcount table has exactly one possible
+ * content, and the sweep confirms it: if the radio's held anything else this
+ * would not agree on 4096 cases.
+ */
+int ambe_popcount_bits(uint32_t x, int n)
+{
+    uint32_t v = ambe_lsl_hw((int32_t)x, 32 - n);
+    int c = 0;
+
+    while (v) {
+        c += (int)(v & 1u);
+        v >>= 1;
+    }
+    return c;
 }

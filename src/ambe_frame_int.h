@@ -12,6 +12,9 @@
 
 #include <stdint.h>
 
+/* Math_PopCountBits 0x000189F4: the population count of the low `n` bits. */
+int ambe_popcount_bits(uint32_t x, int n);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 
