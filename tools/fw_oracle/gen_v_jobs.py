@@ -153,8 +153,46 @@ C_ACC   = C_VOI + N_VOI
 N_HEAD  = C_ACC + NS               # everything up to and including acc-before
 
 
-def gen(jobfile, src, limit=None, stages=False):
+def octave_rows(src):
+    """Records with the pitches moved into the octave-repair bands.
+
+    Vocoder_SynthesizeVoiced has two branches that repair an octave jump: with
+    both frames voiced, a previous pitch between 0.4 and 0.6 of this one halves
+    this one, and a this-pitch between 0.4166 and 0.625 of the previous doubles
+    it.  Neither fires anywhere in 617 frames of real speech - mutating both
+    away leaves the whole-function test at 617 of 617 - so the corpus cannot
+    settle them and no amount of more speech would.
+
+    They are reachable by construction: take a real record whose two frames are
+    both voiced, rewrite the two pitch fields into the band, and let the
+    firmware answer.  That is the same move gen_uv_jobs.py makes for the
+    frame-class-2 gain path, and it is the only way either branch gets tested.
+    """
     rows = _rows(src)
+    out = []
+    ratios = [(0x2000, 0x1000), (0x4000, 0x1800), (0x1000, 0x0700),
+              (0x3000, 0x1400), (0x0800, 0x0380), (0x7000, 0x2c00)]
+    for i, r in enumerate(rows):
+        blk = r[C_BLK:C_BLK + NBLK]
+        prv = r[C_PRV:C_PRV + NBLK]
+        # both frames voiced, which is what either branch needs
+        wv = lambda b: (((b[5] & 0xFFFF) << 16) | (b[4] & 0xFFFF)) & 0x55555555
+        if not (wv(blk) and wv(prv)):
+            continue
+        for cur_p, prev_p in ratios:
+            for swap in (0, 1):
+                row = list(r)
+                a, b = (cur_p, prev_p) if not swap else (prev_p, cur_p)
+                row[C_BLK + 6] = a          # cur[0xc]
+                row[C_PRV + 6] = b          # prev[0xc]
+                out.append(row)
+        if len(out) >= 240:
+            break
+    return out
+
+
+def gen(jobfile, src, limit=None, stages=False, octave=False):
+    rows = _rows(src) if not octave else octave_rows(src)
     if limit:
         rows = rows[:limit]
     j = emu.Job()
@@ -185,6 +223,35 @@ def gen(jobfile, src, limit=None, stages=False):
     print("wrote %s: %d calls%s" % (jobfile, len(rows),
                                     "" if stages else " (no stage breaks)"))
     return len(rows)
+
+
+def export_octave(outfile, src, dest):
+    """Write the constructed octave-repair cases with the firmware's answers.
+
+    Same column layout as the capture's own fixture, so the test reads both the
+    same way - the only difference is the provenance, and the header says so.
+    """
+    rows = octave_rows(src)
+    res = emu.parse(outfile)
+    assert not res["faults"], res["faults"][:2]
+    assert not res["errors"], res["errors"][:2]
+    n = 0
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeVoiced 0x0001DE10 on CONSTRUCTED inputs: real\n"
+                 "# records from dm32_arc4_1 with the two pitch fields rewritten into\n"
+                 "# the octave-repair bands, which 617 frames of real speech never\n"
+                 "# reach.  tools/fw_oracle/gen_v_jobs.py.  Columns are the capture\n"
+                 "# fixture's exactly; only the provenance differs.\n")
+        for i, r in enumerate(rows):
+            cols = [" ".join(map(str, r[:N_HEAD]))]
+            cols.append(" ".join(map(str, struct.unpack("<%di" % NS,
+                                     res["peek"]["acc%d" % i][0]))))
+            cols.append(" ".join(map(str, struct.unpack("<%dh" % N_VST,
+                                     res["peek"]["st%d" % i][0]))))
+            fh.write(" ".join(cols) + "\n")
+            n += 1
+    print("%s: %d constructed cases" % (dest, n))
+    return n
 
 
 def export(outfile, src, dest, stages=False):
@@ -276,7 +343,11 @@ def audit(outfile, src, shift=0):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    if a[0] == "--export":
+    if a[0] == "--octave":
+        gen(a[1], a[2], None, False, True)
+    elif a[0] == "--export-octave":
+        export_octave(a[1], a[2], a[3])
+    elif a[0] == "--export":
         export(a[1], a[2], a[2])
     elif a[0] == "--audit":
         # the shift lives entirely in the audit: one run answers both questions

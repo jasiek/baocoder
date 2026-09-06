@@ -420,6 +420,53 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
 }
 
 /*
+ * Math_FloatSub 0x00018E5C.  Math_FloatAdd with `subu` where the add has `addu`
+ * - and the operands the other way round: it returns B - A, not A - B.
+ *
+ * The zero cases are not the add's mirrored.  A zero B returns the NEGATED A
+ * with A's exponent (0x00018E88), and a mantissa of exactly 0x8000 saturates to
+ * 0x7FFF there (0x00018EDA) rather than negating to itself.
+ */
+uint16_t ambe_float_sub(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
+                        int16_t *exp_out)
+{
+    uint32_t a = (uint32_t)mant_a & 0xFFFFu;
+    uint32_t b = (uint32_t)mant_b & 0xFFFFu;
+    int32_t sum, sh, e;
+    uint32_t r;
+
+    if (a == 0 || exp_b - exp_a >= 32) {          /* 0x00018E64 */
+        if (b != 0) {
+            *exp_out = (int16_t)exp_b;
+            return (uint16_t)b;
+        }
+        *exp_out = 0;
+        return 0;
+    }
+    if (b == 0 || exp_a - exp_b >= 32) {          /* 0x00018E7E, 0x00018E94 */
+        *exp_out = (int16_t)exp_a;
+        return a == 0x8000u ? 0x7FFFu             /* 0x00018EDA */
+                            : (uint16_t)((uint32_t)(-(int32_t)a) & 0xFFFFu);
+    }
+
+    e = (exp_b < exp_a ? exp_a : exp_b) + 1;
+    sum = asr_hw((int32_t)(b << 16), e - exp_b)
+        - asr_hw((int32_t)(a << 16), e - exp_a);
+    if (sum == 0) {
+        *exp_out = 0;
+        return 0;
+    }
+    sh = norm_shift(sum);
+    r = (uint32_t)lsl_hw(sum, sh) >> 16;
+    if (r == 0) {
+        *exp_out = 0;
+        return 0;
+    }
+    *exp_out = (int16_t)(e - sh);
+    return (uint16_t)r;
+}
+
+/*
  * Math_Sqrt 0x00019364, exactly - which ambe_sqrt above is not, and the
  * difference is not a rounding quibble.
  *

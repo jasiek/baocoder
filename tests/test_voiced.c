@@ -56,6 +56,8 @@
 #define NDEST 0x102
 #define NENV  (0xA8 + 4)
 #define NBLOCK 0x101
+#define N_VST 0x22C
+#define N_VOI 0x38
 
 int main(void)
 {
@@ -249,6 +251,123 @@ int main(void)
               iok, in);
         printf("[Vocoder_InterpolateSpectralEnvelope: %d cases, %d bit-exact, "
                "%d writing nothing] ", in, iok, untouched);
+    }
+
+    {   /* Vocoder_SynthesizeVoiced itself, against the 617 calls the radio
+           made over a real capture - the oracle this whole sequence was built
+           for.  Everything above is a stage of this. */
+        FILE *g = fixture_open("dm32_arc4_1.fwvoiced");
+        int vn = 0, vacc = 0, vst = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            static int16_t st[N_VST], ref_st[N_VST], cur[68], prv[68], voi[N_VOI];
+            static int32_t acc[80], ref_acc[80];
+            long pitch;
+            char *p = line;
+            int k, bad;
+
+            if (line[0] == '#')
+                continue;
+            pitch = strtol(p, &p, 10);
+            for (k = 0; k < 68; k++)     cur[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 68; k++)     prv[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < N_VST; k++)  st[k]  = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < N_VOI; k++)  voi[k] = (int16_t)strtoul(p, &p, 10);
+            for (k = 0; k < 80; k++)     acc[k] = (int32_t)strtol(p, &p, 10);
+            for (k = 0; k < 80; k++) ref_acc[k] = (int32_t)strtol(p, &p, 10);
+            for (k = 0; k < N_VST; k++) ref_st[k] = (int16_t)strtol(p, &p, 10);
+
+            ambe_voiced_synth(acc, 0x50, st, cur, prv, voi, (int16_t)pitch);
+
+            for (bad = 0, k = 0; k < 80; k++)
+                if (acc[k] != ref_acc[k]) {
+                    if (vn - vacc < 3)
+                        CHECK(0, "call %d sample %d: %d, firmware %d\n",
+                              vn, k, (int)acc[k], (int)ref_acc[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                vacc++;
+            for (bad = 0, k = 0; k < N_VST; k++)
+                if (st[k] != ref_st[k]) {
+                    if (vn - vst < 3)
+                        CHECK(0, "call %d state %#x: %d, firmware %d\n",
+                              vn, k, (int)st[k], (int)ref_st[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                vst++;
+            vn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(vn > 600, "only %d calls in the fixture\n", vn);
+        {   /* and the two branches 617 frames of real speech never reach */
+            FILE *h = fixture_open("voiced_octave.fw");
+            int on = 0, oacc = 0, ost = 0;
+
+            while (getline(&line, &cap, h) > 0) {
+                static int16_t st[N_VST], ref_st[N_VST], cur[68], prv[68];
+                static int16_t voi[N_VOI];
+                static int32_t acc[80], ref_acc[80];
+                long pitch;
+                char *p = line;
+                int k, bad;
+
+                if (line[0] == '#')
+                    continue;
+                pitch = strtol(p, &p, 10);
+                for (k = 0; k < 68; k++)     cur[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 68; k++)     prv[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < N_VST; k++)  st[k]  = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < N_VOI; k++)  voi[k] = (int16_t)strtoul(p, &p, 10);
+                for (k = 0; k < 80; k++)     acc[k] = (int32_t)strtol(p, &p, 10);
+                for (k = 0; k < 80; k++) ref_acc[k] = (int32_t)strtol(p, &p, 10);
+                for (k = 0; k < N_VST; k++) ref_st[k] = (int16_t)strtol(p, &p, 10);
+
+                ambe_voiced_synth(acc, 0x50, st, cur, prv, voi, (int16_t)pitch);
+                for (bad = 0, k = 0; k < 80; k++)
+                    if (acc[k] != ref_acc[k]) {
+                        if (on - oacc < 3)
+                            CHECK(0, "octave case %d sample %d: %d, firmware %d\n",
+                                  on, k, (int)acc[k], (int)ref_acc[k]);
+                        bad = 1;
+                        break;
+                    }
+                if (!bad)
+                    oacc++;
+                for (bad = 0, k = 0; k < N_VST; k++)
+                    if (st[k] != ref_st[k]) {
+                        if (on - ost < 3)
+                            CHECK(0, "octave case %d state %#x: %d, firmware %d\n",
+                                  on, k, (int)st[k], (int)ref_st[k]);
+                        bad = 1;
+                        break;
+                    }
+                if (!bad)
+                    ost++;
+                on++;
+            }
+            free(line);
+            line = NULL;
+            cap = 0;
+            fclose(h);
+            CHECK(on > 200, "only %d constructed octave cases\n", on);
+            CHECK(oacc == on, "the octave branches: accumulator exact on %d of %d\n",
+                  oacc, on);
+            CHECK(ost == on, "the octave branches: state exact on %d of %d\n",
+                  ost, on);
+            printf("[the octave-repair branches, which real speech never reaches: "
+                   "%d constructed calls, %d/%d exact] ", on, oacc, ost);
+        }
+        CHECK(vacc == vn, "the accumulator is exact on %d of %d\n", vacc, vn);
+        CHECK(vst == vn, "the channel state is exact on %d of %d\n", vst, vn);
+        printf("[Vocoder_SynthesizeVoiced: %d firmware calls, accumulator %d, "
+               "state %d] ", vn, vacc, vst);
     }
 
     CHECK(clamped > 0, "no harmonic reaches the clamp, where the gain would "

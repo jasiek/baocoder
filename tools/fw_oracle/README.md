@@ -203,6 +203,27 @@ python3 tools/fw_oracle/gen_v_jobs.py --audit /tmp/v.out tests/fixtures/dm32_arc
 | against record *i+1*'s | 0 / 616 | 0 / 616 |
 | against record *i+2*'s | 0 / 615 | 0 / 615 |
 
+Once the transcription existed it reproduced all 617 on both the accumulator and
+all 556 shorts of state - but the fixture cannot reach everything. Mutating
+either octave-repair branch out of `src/ambe_voiced.c` leaves the whole-function
+test at 617 of 617: with both frames voiced, a previous pitch between 0.4 and 0.6
+of this one halves this one, and no frame of this capture does that. So
+`--octave` builds the cases instead, taking real records and rewriting the two
+pitch fields into the band:
+
+```sh
+python3 tools/fw_oracle/gen_v_jobs.py --octave /tmp/oct.job \
+        tests/fixtures/dm32_arc4_1.fwvoiced
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/oct.job /tmp/oct.out
+python3 tools/fw_oracle/gen_v_jobs.py --export-octave /tmp/oct.out \
+        tests/fixtures/dm32_arc4_1.fwvoiced tests/fixtures/voiced_octave.fw
+```
+
+240 constructed calls, and they earned their keep immediately: the halving path
+takes `-phase >> 1` on a signed int, an arithmetic shift, and the transcription
+had it as a logical one. Real speech never reaches that line, so the 617-call
+fixture was green with the bug in place.
+
 The second line is the point. The first would pass on a capture that had paired
 state with the wrong frame from the beginning; the second says the pairing
 carries information, the same check that established the unvoiced capture.

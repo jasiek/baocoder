@@ -33,4 +33,15 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
                                  uint16_t pitch, const uint16_t *block,
                                  int16_t block_exp);
 
+/*
+ * Vocoder_SynthesizeVoiced 0x0001DE10.  `st` is the channel state at
+ * pChannelState+0x18 seen as shorts, `cur` and `prev` the 68-short parameter
+ * blocks, and `voiced` the per-harmonic flags cur[0x40..0x41] points at in the
+ * running firmware - passed explicitly, because a library that dereferences an
+ * address embedded in its input cannot be handed a fixture.
+ */
+void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
+                       const int16_t *cur, const int16_t *prev,
+                       const int16_t *voiced, int16_t pitch);
+
 #endif /* AMBE_VOICED_INT_H */

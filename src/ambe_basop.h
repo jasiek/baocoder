@@ -143,6 +143,14 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
                             int exp_b, int16_t *exp_out);
 
 /*
+ * Math_FloatSub 0x00018E5C: the add with `subu`, returning B - A rather than
+ * A - B, and with zero cases that are not the add's mirrored - a zero B returns
+ * a negated A, and a mantissa of 0x8000 saturates to 0x7FFF there.
+ */
+uint16_t ambe_float_sub(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
+                        int16_t *exp_out);
+
+/*
  * Math_Sqrt 0x00019364, exactly - which ambe_sqrt above is NOT.  That one is
  * measured against libm and returns the bare mantissa; this returns it in the
  * high half of the word the way the stock code does, carries the stock rounding

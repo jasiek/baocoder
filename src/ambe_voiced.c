@@ -17,7 +17,7 @@
  *   Vocoder_ComputeHarmonicGains        0x0001D71C   here
  *   Vocoder_SynthesizeHarmonicSpectrum  0x0001D4C8   here
  *   Vocoder_InterpolateSpectralEnvelope 0x0001D9F0   here
- *   Vocoder_SynthesizeVoiced            0x0001DE10   not yet
+ *   Vocoder_SynthesizeVoiced            0x0001DE10   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -509,5 +509,328 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
             win_dn -= 0x10000;
             outp[i] += e < 0 ? asr_hw(v, -e) : lsl_hw(v, e);
         }
+    }
+}
+
+/* the two halves of an int32 stored as a pair of shorts, which is how the
+   channel state carries the phase accumulator at [0xa8] */
+static int32_t rd32(const int16_t *p)
+{
+    return (int32_t)(((uint32_t)(uint16_t)p[1] << 16) | (uint16_t)p[0]);
+}
+
+static void wr32(int16_t *p, int32_t v)
+{
+    p[0] = (int16_t)(uint16_t)((uint32_t)v & 0xFFFF);
+    p[1] = (int16_t)(uint16_t)((uint32_t)v >> 16);
+}
+
+/* the normalise-then-denormalise the stock code runs over every phase advance.
+   It is the identity on a value whose leading bits are redundant, which after
+   ff1 they are; it is transcribed because the code does it, not because it
+   changes anything. */
+static int32_t renorm(int32_t v)
+{
+    int sh = nsh(v);
+    return asr_hw(ambe_shl32(v, sh), sh);
+}
+
+/*
+ * Vocoder_SynthesizeVoiced 0x0001DE10, whole.
+ *
+ * The function the other three exist for, and the last stage of the codec with
+ * no transcription.  It carries the phase accumulator and the overlap-add
+ * history across frames, decides how the previous frame's pitch continues into
+ * this one, and drives the three helpers twice over: once to fade the previous
+ * frame's harmonics out and once to fade this frame's in.
+ *
+ * The shape, in order:
+ *
+ *   the voicing decision - `(word & 0x55555555) != 0`, the low bit of each
+ *   2-bit crumb, which is the same mask the pitchless branch tests;
+ *
+ *   the pitch continuation.  With both frames voiced, a previous pitch between
+ *   0.4 and 0.6 of this one halves this one, and a this-pitch between 0.417 and
+ *   0.625 of the previous doubles it - the codec's octave-jump repair, and the
+ *   two flags it sets change the phase accumulator later;
+ *
+ *   the previous frame's harmonics, synthesised from the state's own spectrum
+ *   and faded OUT across the frame - `out += buf * (1 - ramp)`;
+ *
+ *   this frame's, synthesised twice with different marks (2 then 1) into the
+ *   same 256-sample buffer, each pass consumed by the interpolator before the
+ *   next overwrites it, and faded IN - `out += buf * ramp`;
+ *
+ *   the state update: the phase accumulator less one turn per harmonic, the
+ *   overlap history shifted by n, and a block-float pair at [0xaa] that the
+ *   next frame reads back as its starting gain.
+ *
+ * `voiced` is what cur[0x40..0x41] points at in the running firmware - the
+ * per-harmonic flags Vocoder_BuildFrameResetPattern fills.  It is passed
+ * explicitly rather than followed through the block, because a library that
+ * dereferences an address embedded in its input is a library that cannot be
+ * handed a fixture.
+ */
+void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
+                       const int16_t *cur, const int16_t *prev,
+                       const int16_t *voiced, int16_t pitch)
+{
+    enum { VMASK = 0x55555555 };
+    int32_t buf[168];
+    int32_t nn      = (int16_t)n;
+    uint32_t n_hi   = (uint32_t)(nn * 0x10000);
+    int prev_v = ((uint32_t)rd32(prev + 4) & (uint32_t)VMASK) != 0;
+    int cur_v  = ((uint32_t)rd32(cur  + 4) & (uint32_t)VMASK) != 0;
+    uint16_t last_g = (uint16_t)st[0xaa], last_e = (uint16_t)st[0xab];
+    int32_t phase   = rd32(st + 0xa8);
+    int32_t p_prev  = (uint16_t)prev[6];
+    int32_t p_cur   = (uint16_t)cur[6];
+    int16_t sm_prev = prev[6];
+    int32_t advance = 0, delta = 0;
+    int16_t count = 0, inv_e;
+    uint16_t inv_n;
+    int half = 0, dbl = 0, sh, i;
+
+    /* 1/n, the ramp's step */
+    if (n_hi == 0) { inv_e = 0xf; sh = 0; }
+    else           { sh = nsh((int32_t)n_hi); inv_e = (int16_t)(0xf - sh); }
+    inv_n = ambe_float_div_exp(0x40000000, 1, nhi((int32_t)n_hi, sh), inv_e, &inv_e);
+
+    if (prev_v && cur_v) {
+        /* the octave-jump repair, and the average pitch the phase advances by */
+        if (p_prev < (p_cur * 0x9998 >> 16) && (p_cur * 0x6666 >> 16) < p_prev
+            && p_prev < 0x4000) {
+            p_cur = p_cur >> 1;
+            half = 1;
+        } else if ((sm_prev * 0x6aaa >> 16) < p_cur
+                   && p_cur < (sm_prev * 0xa000 >> 16) && p_cur < 0x4000) {
+            p_cur = (int32_t)ambe_shl32(p_cur, 17) >> 16;
+            dbl = 1;
+        }
+        delta = (int32_t)((uint32_t)(p_cur * 0x10000) - (uint32_t)(p_prev * 0x10000)) >> 16;
+        advance = asr_hw(nn * (int32_t)(int16_t)((uint32_t)(
+                      (ambe_shl32(p_cur * 0x10000, 0) >> 1)
+                    + (ambe_shl32(p_prev * 0x10000, 0) >> 1)) >> 16) * 2, 4) + phase;
+        advance = renorm(advance);
+        count = (int16_t)((uint32_t)advance >> 16);
+    } else if (prev_v) {
+        advance = renorm(asr_hw(sm_prev * nn * 2, 4) + phase);
+        count = (int16_t)((uint32_t)advance >> 16);
+    } else if (cur_v) {
+        advance = renorm(asr_hw((int32_t)cur[6] * nn * 2, 4) + phase);
+        count = (int16_t)((uint32_t)advance >> 16);
+        p_prev  = p_cur;              /* this frame's pitch becomes the history */
+        sm_prev = cur[6];
+    }
+
+    memcpy(buf, st, 0xa8 * sizeof(int16_t));       /* the overlap history in */
+
+    /* the previous frame's harmonics, from the spectrum the state still holds */
+    if (prev_v && count > 0) {
+        uint16_t g[0x38], e[0x38];
+
+        ambe_voiced_harmonic_gains(g, e, phase, (int16_t)p_prev, (int16_t)delta,
+                                   n, count);
+        for (i = 0; i < count; i++)
+            ambe_voiced_interp_envelope(buf, (int16_t)g[i], (int16_t)e[i],
+                                        (uint16_t)prev[6],
+                                        (const uint16_t *)(st + 0xe6), st[0xe5]);
+        last_g = g[count - 1];
+        last_e = e[count - 1];
+    }
+
+    /* fade the previous frame out across the frame */
+    if (nn > 0) {
+        int32_t step = ambe_shl32((int32_t)(int16_t)inv_n, 16);
+        int32_t ramp = 0;
+        int lim = (int)(((uint32_t)(n - 1) & 0xffff) + 1);
+
+        for (i = 0; i < lim; i++) {
+            int64_t prod = (int64_t)(ramp >> 16) * (int64_t)buf[i];
+            uint32_t t = ((uint32_t)prod >> 15)
+                       | (uint32_t)((int32_t)(prod >> 32) << 17);
+            acc[i] = (int32_t)((uint32_t)(buf[i] + acc[i]) - t);
+            if (i + 1 == lim)
+                break;
+            ramp += inv_e < 0 ? asr_hw(step, -inv_e) : lsl_hw(step, inv_e);
+        }
+    }
+
+    memset(buf, 0, 0x150 * sizeof(int16_t));       /* clear for this frame */
+
+    {   /* this frame's harmonics, pass one: the marked-2 set */
+        int16_t step, ea, eb, sm;
+        int32_t start;
+        uint32_t v;
+
+        if ((cur[6] & 0x7ffffff) == 0x4000000)
+            step = -1;
+        else
+            step = (int16_t)(((uint32_t)(cur[6] * -0x20) & 0x1fffff) >> 5);
+
+        v = (uint32_t)ambe_shl32(cur[6], 16);
+        if (v == 0) {
+            eb = -4; sm = 0; sh = 0;
+            if (pitch == 0) { ea = -4; sh = 0; }
+            else            { sh = nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
+        } else {
+            sh = nsh((int32_t)v);
+            eb = (int16_t)(-4 - sh);
+            sm = nhi((int32_t)v, sh);
+            if (pitch == 0) { ea = -4; sh = 0; }
+            else            { sh = nsh(ambe_shl32(pitch, 16)); ea = (int16_t)(-4 - sh); }
+        }
+        {
+            int16_t oe;
+            uint16_t q = ambe_float_div_exp(lsl_hw(ambe_shl32(pitch, 16), sh),
+                                            ea, (uint16_t)sm, eb, &oe);
+            int s2 = (int16_t)(oe - 0xf);
+            start = s2 < 0 ? asr_hw(ambe_shl32((int32_t)(int16_t)q, 16), -s2)
+                           : lsl_hw(ambe_shl32((int32_t)(int16_t)q, 16), s2);
+        }
+
+        if (ambe_voiced_harmonic_spectrum((int32_t *)(st + 0xe6), st + 0xe5, step,
+                                          (const uint16_t *)(st + 0xad), voiced,
+                                          (const uint16_t *)(cur + 8), cur[0x42],
+                                          cur[2],
+                                          (int16_t)((uint32_t)(start + 0x8000) >> 16),
+                                          2) != 0) {
+            uint32_t g = (uint32_t)((asr_hw(ambe_shl32((int32_t)(uint16_t)cur[7], 16), 8)
+                                     - 0x100000) + (int32_t)n_hi);
+            int16_t ge;
+
+            if (g == 0) { ge = 0xf; sh = 0; }
+            else        { sh = nsh((int32_t)g); ge = (int16_t)(0xf - sh); }
+            ambe_voiced_interp_envelope(buf, nhi((int32_t)g, sh), ge,
+                                        (uint16_t)cur[6],
+                                        (const uint16_t *)(st + 0xe6), st[0xe5]);
+        }
+    }
+
+    if (cur_v) {
+        if (half) {
+            int32_t old = rd32(st + 0xa8);
+
+            phase = old * 2;
+            /*
+             * Halving the pitch doubles the phase, and if that takes it past a
+             * whole turn the turn is given back and the state's block-float
+             * pair is rebuilt from what is left over - the next frame reads
+             * that pair as its starting gain, so a frame that repairs an octave
+             * has to hand the repair on.
+             */
+            if ((phase >> 16) > 0) {
+                int32_t rem = phase - 0x10000;
+                uint32_t pp = (uint32_t)ambe_shl32((uint16_t)prev[6], 16);
+                int sa, sb;
+
+                phase = rem;
+                if (rem == INT32_MIN) {
+                    sa = nsh(0x3fffffff);
+                    rem = 0x3fffffff;
+                } else {
+                    /* `-iStack_368 >> 1` on a signed int: an ARITHMETIC
+                       shift, and rem is positive here as often as not, so a
+                       logical one differs on half the cases */
+                    int32_t halfneg = (-rem) >> 1;
+                    sa = halfneg ? nsh(halfneg) : 0;
+                    rem = halfneg;
+                }
+                sb = (uint16_t)prev[6] ? nsh((int32_t)pp) : 0;
+                {
+                    int16_t oe;
+                    st[0xaa] = (int16_t)ambe_float_div_exp(
+                        lsl_hw(rem, sa), 0xf - sa,
+                        (uint16_t)nhi((int32_t)pp, sb), (int16_t)(-4 - sb), &oe);
+                    st[0xab] = oe;
+                }
+            }
+            delta   = (int16_t)(((uint32_t)delta & 0x7fff) << 1);
+            wr32(st + 0xa8, phase);
+            {   /* the previous pitch doubles too, saturating */
+                uint32_t v = (uint32_t)(p_prev * 0x10000);
+
+                if (v == 0)
+                    sm_prev = 0;
+                else if ((int16_t)((int16_t)ambe_lzcount32(
+                             (uint32_t)((int32_t)v < 0 ? ~v : v)) - 1) < 1)
+                    sm_prev = (v & 0x80000000u) == 0 ? 0x7fff : -0x8000;
+                else
+                    sm_prev = (int16_t)(((uint32_t)p_prev & 0x7fff) << 1);
+            }
+            advance = phase + (advance - old) * 2;
+            count   = (int16_t)((uint32_t)advance >> 16);
+        } else if (dbl) {
+            phase = rd32(st + 0xa8) >> 1;
+            advance = ((advance - rd32(st + 0xa8)) >> 1) + phase;
+            delta = (int32_t)(int16_t)(ambe_shl32(delta >> 1, 17) >> 17);
+            sm_prev = (int16_t)(((uint32_t)p_prev & 0x1ffff) >> 1);
+            count = (int16_t)((uint32_t)advance >> 16);
+            wr32(st + 0xa8, phase);
+        }
+
+        {   /* pass two: the marked-1 set, from index 0 */
+            int16_t step;
+
+            if ((cur[6] & 0x7ffffff) == 0x4000000)
+                step = -1;
+            else
+                step = (int16_t)(((uint32_t)(cur[6] * -0x20) & 0x1fffff) >> 5);
+            ambe_voiced_harmonic_spectrum((int32_t *)(st + 0xe6), st + 0xe5, step,
+                                          (const uint16_t *)(st + 0xad), voiced,
+                                          (const uint16_t *)(cur + 8), cur[0x42],
+                                          cur[2], 0, 1);
+        }
+        ambe_voiced_interp_envelope(buf, (int16_t)st[0xaa], st[0xab],
+                                    (uint16_t)cur[6],
+                                    (const uint16_t *)(st + 0xe6), st[0xe5]);
+        if (count > 0) {
+            uint16_t g[0x38], e[0x38];
+
+            ambe_voiced_harmonic_gains(g, e, phase, sm_prev, (int16_t)delta,
+                                       n, count);
+            for (i = 0; i < count; i++)
+                ambe_voiced_interp_envelope(buf, (int16_t)g[i], (int16_t)e[i],
+                                            (uint16_t)cur[6],
+                                            (const uint16_t *)(st + 0xe6), st[0xe5]);
+            last_g = g[count - 1];
+            last_e = e[count - 1];
+        }
+    }
+
+    /* the phase accumulator, less one turn per harmonic synthesised */
+    wr32(st + 0xa8, advance + count * -0x10000);
+
+    /* fade this frame in */
+    if (nn > 0) {
+        int32_t step = ambe_shl32((int32_t)(int16_t)inv_n, 16);
+        int32_t ramp = 0;
+        int lim = (int)(((uint32_t)(n - 1) & 0xffff) + 1);
+
+        for (i = 0; i < lim; i++) {
+            int64_t prod = (int64_t)(ramp >> 16) * (int64_t)buf[i];
+            uint32_t t = ((uint32_t)prod >> 15)
+                       | (uint32_t)((int32_t)(prod >> 32) << 17);
+            acc[i] = (int32_t)((uint32_t)acc[i] + t);
+            if (i + 1 == lim)
+                break;
+            ramp += inv_e < 0 ? asr_hw(step, -inv_e) : lsl_hw(step, inv_e);
+        }
+    }
+
+    memcpy(st, buf + nn, 0xa8 * sizeof(int16_t));  /* the history out */
+
+    if (!prev_v && !cur_v) {
+        st[0xaa] = 0;
+        st[0xab] = 0;
+        return;
+    }
+    if (n_hi == 0) { sh = 0; i = 0xf; }
+    else           { sh = nsh((int32_t)n_hi); i = (int16_t)(0xf - sh); }
+    {
+        int16_t oe;
+        st[0xaa] = (int16_t)ambe_float_sub(nhi((int32_t)n_hi, sh), i,
+                                           last_g, (int16_t)last_e, &oe);
+        st[0xab] = oe;
     }
 }

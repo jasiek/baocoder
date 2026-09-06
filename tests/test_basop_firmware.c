@@ -37,11 +37,12 @@ int main(void)
     FILE *f = fixture_open("basop_float.fw");
     char *line = NULL;
     size_t cap = 0;
-    int n = 0, nadd = 0, ndiv = 0, add_ok = 0, div_ok = 0;
+    int n = 0, nadd = 0, ndiv = 0, nsub = 0;
+    int add_ok = 0, div_ok = 0, sub_ok = 0;
     int shift32 = 0, sat = 0;
 
     while (getline(&line, &cap, f) > 0) {
-        long ma, ea, mb, eb, am, ax, dm, dx;
+        long ma, ea, mb, eb, am, ax, dm, dx, sm, sx;
         char *p = line;
         uint16_t got;
         int16_t gx;
@@ -52,6 +53,7 @@ int main(void)
         mb = strtol(p, &p, 10); eb = strtol(p, &p, 10);
         am = strtol(p, &p, 10); ax = strtol(p, &p, 10);
         dm = strtol(p, &p, 10); dx = strtol(p, &p, 10);
+        sm = strtol(p, &p, 10); sx = strtol(p, &p, 10);
 
         gx = 0x7BAD;
         got = ambe_float_add((int32_t)ma, (int)ea, (int32_t)mb, (int)eb, &gx);
@@ -61,6 +63,15 @@ int main(void)
         else
             CHECK(0, "add(%ld,%ld, %ld,%ld) = %u/%d, firmware %ld/%ld\n",
                   ma, ea, mb, eb, (unsigned)got, (int)gx, am, ax);
+
+        gx = 0x7BAD;
+        got = ambe_float_sub((int32_t)ma, (int)ea, (int32_t)mb, (int)eb, &gx);
+        nsub++;
+        if (got == (uint16_t)sm && gx == (int16_t)sx)
+            sub_ok++;
+        else
+            CHECK(0, "sub(%ld,%ld, %ld,%ld) = %u/%d, firmware %ld/%ld\n",
+                  ma, ea, mb, eb, (unsigned)got, (int)gx, sm, sx);
 
         /* the alignment shift the machine masks to six bits and C leaves
            undefined - counted so a fixture that stopped covering it says so */
@@ -135,9 +146,11 @@ int main(void)
     CHECK(add_ok == nadd, "Math_FloatAdd exact on %d of %d\n", add_ok, nadd);
     CHECK(div_ok == ndiv, "Math_FloatDivExponent exact on %d of %d\n",
           div_ok, ndiv);
+    CHECK(sub_ok == nsub, "Math_FloatSub exact on %d of %d\n", sub_ok, nsub);
 
-    printf("[%d cases: Math_FloatAdd %d/%d and Math_FloatDivExponent %d/%d "
-           "bit-exact, including %d alignments by exactly 32 and %d saturating "
-           "operands] ", n, add_ok, nadd, div_ok, ndiv, shift32, sat);
+    printf("[%d cases: Math_FloatAdd %d/%d, Math_FloatDivExponent %d/%d and "
+           "Math_FloatSub %d/%d bit-exact, including %d alignments by exactly 32 "
+           "and %d saturating operands] ", n, add_ok, nadd, div_ok, ndiv,
+           sub_ok, nsub, shift32, sat);
     return t_done("the block-float pair vs the firmware, bit for bit");
 }

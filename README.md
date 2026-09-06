@@ -37,6 +37,7 @@ make tables   # re-extract the quantiser tables from the firmware image
 | Golay(23,12) / (24,12) | `src/golay.c` | firmware `Golay23_Decode` `0x00015230`, `Vocoder_ComputeParityCode` `0x00022DF4` |
 | 72-bit on-air frame ↔ 49-bit payload | `src/ambe_fec.c` | firmware `Vocoder_DescrambleVoiceFrame` `0x0001893C`, `Vocoder_DeinterleaveVoiceBits` `0x000230A4`, `Dsp_LcgSignScramble` `0x00021FE0` |
 | 49 bits → model parameters | `src/ambe_params.c` | AMBE+2 model; firmware `Vocoder_DecodeFrameParameters` `0x0001994C` and the `Vocoder_*SpectralCodebook*` cluster as the behavioural reference |
+| Voiced synthesis, the radio's own | `src/ambe_voiced.c` | **transcribed and bit-exact**: firmware `Vocoder_SynthesizeVoiced` `0x0001DE10` and its helpers `0x0001D71C`, `0x0001D4C8`, `0x0001D9F0` |
 | Parameters → 8 kHz PCM | `src/ambe_synth.c` | MBE synthesis, **ours, not the firmware's** — the radio's voiced synthesiser `Vocoder_SynthesizeVoiced` `0x0001DE10` is not transcribed; `Vocoder_SynthesizeFrame` `0x00019DB8` is the frame it sits in |
 | Windowed FFT (PCM -> spectrum) | `src/ambe_fft.c` | firmware `Dsp_WindowAndComputeFft` `0x00019B6C`, `Dsp_FftForward` `0x000256D0`, `Dsp_FftBitReverseScale` `0x00025224`, the two butterfly kernels `0x00025160` / `0x0002509C` |
 | Unvoiced excitation | `src/ambe_unvoiced.c` | **transcribed and bit-exact**: firmware `Vocoder_SynthesizeUnvoiced` `0x0001AFE0`, `Vocoder_BuildFrameResetPattern` `0x00022CD0`, `FUN_0001abdc` |
@@ -283,19 +284,21 @@ The layer is synthesis, and what is missing has a specific shape: three of its
 four stages are transcribed and bit-exact against the firmware, and none of them
 is in the decode path, because the stage that would call them is not written.
 
-* **`Vocoder_SynthesizeVoiced 0x0001DE10` has no transcription.** It is the one
-  remaining stage with none. `ambe_decode_bits` calls `ambe_synthesize`
-  instead — `src/ambe_synth.c`, which is mbelib's time-domain sum of sinusoids
-  under a generated trapezoid, and says so in its header. That is why
-  `test_synth` compares spectra and levels rather than samples: 0.973 mean band
-  correlation against the radio's own audio, not equality. Parity holds through
-  the parameters and stops at the audio. The oracle for writing it is here now
-  even though the transcription is not: `tests/fixtures/dm32_arc4_1.fwvoiced`
-  carries all six arguments, the accumulator either side and the channel state
-  either side for **617 calls**, and calling the firmware's own function on
-  those arguments reproduces all 617 exactly - against the neighbouring record,
-  0 of 616. `tools/fw_oracle/README.md` has the method and the three wrong
-  guesses about the arguments that it cost.
+* **`Vocoder_SynthesizeVoiced 0x0001DE10` is transcribed and exact, and not yet
+  wired in.** `src/ambe_voiced.c` reproduces the radio's own voiced synthesiser
+  bit for bit: **617 of 617** firmware calls over a real capture, on both the
+  80-sample accumulator and all 556 shorts of channel state, plus **240 of 240**
+  constructed calls covering the two octave-repair branches that 617 frames of
+  real speech never reach. Its three helpers are exact on their own sweeps as
+  well — 1 584, 417 and 900 cases — and so are the four fixed-point primitives
+  under them.
+
+  What remains is plumbing rather than arithmetic. `ambe_decode_bits` still
+  calls `ambe_synthesize` — `src/ambe_synth.c`, mbelib's time-domain sum of
+  sinusoids under a generated trapezoid — so `test_synth` still compares spectra
+  and levels rather than samples, at 0.973 mean band correlation. Rewiring the
+  decode path onto `ambe_voiced_synth`, the blend, the unvoiced synthesiser and
+  the output filter is what turns four exact stages into an exact decoder.
 * **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is implemented and exact, but
   unwired** — `src/ambe_blend.c`, bit-exact on pitch, `L` and envelope over
   **232 firmware calls** (`test_blend`). So are `Vocoder_SynthesizeUnvoiced`
@@ -393,7 +396,7 @@ decoder, executed:
 | `test_firmware` | **the parity test.** Every frame against the firmware's own decoder, executed: classification, `L`, `f0` and every voicing decision required to be *exact*, the spectral envelope bounded | 78 145 checks; 2 052 frames, **all exact**; envelope **0.021 dB** mean, 0.279 dB worst |
 | `test_blend` | `Vocoder_ResampleSpectralEnvelope 0x00026A84`, the two-frame interpolation the synthesiser is handed for the first half of every frame, captured *inside* the function at the one instant where the output and both scratch arrays are live together | 5 checks; **232 calls, bit-exact** on pitch, `L` and envelope; branches 148 current / 31 previous / 53 geometric mean |
 | `test_unvoiced` | `Vocoder_SynthesizeUnvoiced 0x0001AFE0` against the firmware **called directly**, stage by stage: noise generator, windowed segment, voicing flags, shaped spectrum, samples and state | 8 checks; **206 calls, all bit-exact** — 16 480 generated values, 11 536 voicing flags, 412 buffers of 256, 16 480 samples |
-| `test_voiced` | `Vocoder_SynthesizeVoiced 0x0001DE10`'s stages, innermost outwards, each swept against the firmware on its own before the next is written. all three helpers — `Vocoder_ComputeHarmonicGains` `0x0001D71C`, `Vocoder_SynthesizeHarmonicSpectrum` `0x0001D4C8` (the inverse transform) and `Vocoder_InterpolateSpectralEnvelope` `0x0001D9F0` (the resample and window). The function above them is not written yet | 1 597 checks; 1 584 + 417 + 900 cases, **all bit-exact**. Both sweeps are mutation-tested rather than trusted: breaking the bin numbering leaves 12 of 417 passing, the phase fold 195, the interpolator's window 262 of 900, its wrap sample 299 |
+| `test_voiced` | `Vocoder_SynthesizeVoiced 0x0001DE10`'s stages, innermost outwards, each swept against the firmware on its own before the next is written. `Vocoder_SynthesizeVoiced` `0x0001DE10` and all three of its helpers, each swept against the firmware on its own before the one above it was written | 1 603 checks; the helpers **1 584 + 417 + 900** cases and the function itself **617** firmware calls — accumulator and all 556 shorts of state — plus **240** constructed calls for the octave-repair branches real speech never reaches, **all bit-exact**. Every sweep is mutation-tested rather than trusted: breaking the bin numbering leaves 12 of 417 passing, the phase fold 195, the interpolator's window 262 of 900, the phase-per-harmonic 316 of 617. The constructed cases earned their keep — they caught an arithmetic shift written as a logical one, which no real frame reaches |
 | `test_postfilter` | `FUN_00018a2c`, the output filter, twice over: given the radio's own state, and then carrying its own across calls — a filter can pass the first and fail the second, and the second is how it is used. The final scaling to int16 alongside | 4 checks; **205 calls, 16 400 samples, all bit-exact** |
 | `test_mbelib` | how well mbelib decodes the same frames, given the radio is the definition | 10 614 checks; `w0` 3.1e-6, `L` 242/242, voicing **10 006/10 006** exact; predictor state **4.3%** on gain and **12.9%** on amplitudes apart |
 | `test_synth` | 16-band log-energy spectrum and level, per frame, against **the radio's own audio** | mean band correlation **0.973**, worst 0.831; mbelib on the same reference 0.969 |

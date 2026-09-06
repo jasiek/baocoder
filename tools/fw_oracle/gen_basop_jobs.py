@@ -48,6 +48,7 @@ import emu
 
 FADD = 0x00018DD8
 FDIV = 0x00018EF4
+FSUB = 0x00018E5C
 SQRT = 0x00019364
 EXP  = 0x00051000          # the short they write through their last argument
 
@@ -117,6 +118,11 @@ def gen(jobfile):
                eb & 0xFFFFFFFF, EXP)
         j.getreg("r0")
         j.peek("ae%d" % i, EXP, 2)
+        j.poke(EXP, b"\xEE\xEE")
+        j.call(FSUB, ma & 0xFFFFFFFF, ea & 0xFFFFFFFF, mb & 0xFFFFFFFF,
+               eb & 0xFFFFFFFF, EXP)
+        j.getreg("r0")
+        j.peek("se%d" % i, EXP, 2)
         if (mb & 0xFFFF) != 0:                 # `divs` traps on a zero divisor
             j.poke(EXP, b"\xEE\xEE")
             j.call(FDIV, ma & 0xFFFFFFFF, ea & 0xFFFFFFFF, mb & 0xFFFFFFFF,
@@ -127,7 +133,7 @@ def gen(jobfile):
         j.poke(EXP, struct.pack("<h", e))
         j.call(SQRT, m & 0xFFFFFFFF, EXP)
         j.getreg("r0")
-        j.peek("se%d" % i, EXP, 2)
+        j.peek("qe%d" % i, EXP, 2)
     j.write(jobfile)
     print("wrote %s: %d add/divide cases, %d square roots"
           % (jobfile, len(cases), len(_sqrt_cases())))
@@ -145,17 +151,22 @@ def export(outfile, dest):
         fh.write("# Math_FloatAdd 0x00018DD8 and Math_FloatDivExponent 0x00018EF4,\n"
                  "# executed under the p-code emulator.  tools/fw_oracle/gen_basop_jobs.py.\n"
                  "# per record: mantA expA mantB expB  addMant addExp  divMant divExp\n"
+                 "#             subMant subExp - Math_FloatSub 0x00018E5C, which\n"
+                 "#             returns B - A rather than A - B\n"
                  "# A divMant/divExp of -1 means the case was not run: mantB is zero\n"
                  "# and the divide would trap.\n")
         for (ma, ea, mb, eb) in cases:
             am = r0[k] & 0xFFFF; k += 1
             ax = struct.unpack("<h", res["peek"]["ae%d" % n][0])[0]
+            sm = r0[k] & 0xFFFF; k += 1
+            sx = struct.unpack("<h", res["peek"]["se%d" % n][0])[0]
             if (mb & 0xFFFF) != 0:
                 dm = r0[k] & 0xFFFF; k += 1
                 dx = struct.unpack("<h", res["peek"]["de%d" % n][0])[0]
             else:
                 dm = dx = -1
-            fh.write("%d %d %d %d %d %d %d %d\n" % (ma, ea, mb, eb, am, ax, dm, dx))
+            fh.write("%d %d %d %d %d %d %d %d %d %d\n"
+                     % (ma, ea, mb, eb, am, ax, dm, dx, sm, sx))
             n += 1
     with open(dest.replace("float", "sqrt"), "w") as fh:
         fh.write("# Math_Sqrt 0x00019364, executed under the p-code emulator.\n"
@@ -165,7 +176,7 @@ def export(outfile, dest):
                  "#   the exponent it wrote back.\n")
         for (m, e) in _sqrt_cases():
             sm = r0[k]; k += 1
-            sx = struct.unpack("<h", res["peek"]["se%d" % len(seen)][0])[0]
+            sx = struct.unpack("<h", res["peek"]["qe%d" % len(seen)][0])[0]
             seen.append(1)
             fh.write("%d %d %u %d\n" % (m - (1 << 32) if m >= (1 << 31) else m,
                                          e, sm, sx))
