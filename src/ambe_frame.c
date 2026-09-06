@@ -23,9 +23,7 @@
  *   Dsp_HilbertTransform               0x00029D1C   here
  *   Dsp_NormalizeArray                 0x0001ADA0   here
  *   Math_ArrayShiftSaturate            0x0001AF5C   here
- *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
- *   Dsp_HilbertTransform               0x00029D1C   not yet
- *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
+ *   Vocoder_MatchExcitationEnergy      0x000277F8   here
  *   Vocoder_SynthesizeFrame            0x00019DB8   not yet
  *
  * SPDX-License-Identifier: ISC
@@ -579,4 +577,348 @@ int32_t ambe_dot_norm(int16_t *exp_out, const int16_t *a, const int16_t *b,
     if (shift >= 0)
         return (int32_t)(lo << (shift & 31));
     return (int32_t)(uint32_t)((((uint64_t)hi << 32) | lo) >> (-shift));
+}
+
+/*
+ * Vocoder_MatchExcitationEnergy 0x000277F8.
+ *
+ * The spectral amplitude enhancement, in block float, and it is the IMBE one:
+ *
+ *     W_l = sqrt(M_l) * [ (R0^2 + R1^2 - 2*R0*R1*cos(l*w0))
+ *                         / (w0 * R0 * (R0^2 - R1^2)) ] ^ 0.25
+ *
+ *   R0 = sum M_l^2                 - FUN_0001ABDC over the array with itself
+ *   R1 = sum M_l^2 * cos(l*w0)     - the same sum, weighted by the cosine
+ *
+ * the zeroth and first lags of the amplitude autocorrelation.  The fourth root
+ * arrives as two nested Math_Sqrt calls with the amplitude folded in between
+ * them, which is why a multiply sits between two square roots in the middle of
+ * the loop; the cosine comes off g_awSineTable512 through a phase accumulator
+ * stepping `pitch * 64`, so l*w0 lands on table index l*pitch/1024 and the
+ * whole harmonic series stays inside the 512 entries exactly when it stays
+ * under Nyquist, which is what makes an unmasked index safe here.
+ *
+ * Three things are worth naming against mbelib's mbe_spectralAmpEnhance, which
+ * computes the same weights:
+ *
+ *   the unenhanced low band is L/8, not mbelib's L/4 - and those harmonics are
+ *   not left alone, they are HALVED.  That reads as an attenuation and is a
+ *   normalisation: the weights the rest get are clamped to [0x2000, 0x4CCD] in
+ *   Q15, which is [0.25, 0.6], and measured against a low band sitting at 0.5
+ *   those are mbelib's [0.5, 1.2] exactly;
+ *
+ *   the absolute factor washes out at the end anyway, and that wash is the last
+ *   third of the function: Dsp_NormalizeArray, R0 measured a second time, then
+ *   every harmonic scaled by sqrt(R0_before / R0_after).  The enhancement
+ *   changes the shape of the envelope and not its energy;
+ *
+ *   the reference-energy pair the caller passes - pChannelState+0x7c0 and
+ *   +0x7c2 - is read and rewritten here as a one-pole average, 0.95 of it plus
+ *   0.8 of this frame's R0 at 2^-4, floored at an exponent of -0x11.  Nothing
+ *   in this function consumes it.  It is state kept for someone else, and it
+ *   is what makes the enhancement stateful even though its own arithmetic is
+ *   not.
+ *
+ * `amps` is the 0x38-short amplitude block and `count` its harmonic count; the
+ * cosine scratch is the same length, so a count past 0x38 runs off both, as it
+ * does in the stock code.
+ */
+
+/* 0x00027C1C, the literal wedged between two branches inside the function
+   itself: 0.9502 in Q30, the enhancement's numerator constant. */
+#define MEE_NUMERATOR 0x3cd013a9
+
+/* w0 * R0 * X, the denominator, through the stock code's Q15 steps. */
+static int32_t mee_denominator(uint16_t x, uint16_t r0m, int16_t pitch)
+{
+    int16_t t = (int16_t)ambe_asr_hw(
+        (int32_t)((uint32_t)((int32_t)(int16_t)x * (int32_t)(int16_t)r0m) * 2u), 16);
+
+    return (int32_t)((uint32_t)((int32_t)t * (int32_t)pitch) * 2u);
+}
+
+void ambe_match_excitation_energy(int16_t *amps, int16_t *exp_io,
+                                  int16_t *ref_mant, int16_t *ref_exp,
+                                  int16_t pitch, int16_t count)
+{
+    int16_t cosk[0x38];
+    const int16_t e_in = *exp_io;
+    int16_t e_r0, e_r1 = 0;
+    uint16_t r0m, r1m = 0;
+    int32_t v;
+    int i, n, sh;
+
+    memset(cosk, 0, sizeof cosk);
+
+    v    = ambe_dot_norm(&e_r0, amps, amps, count);
+    e_r0 = (int16_t)(e_r0 + (int16_t)(2 * e_in));
+    r0m  = (uint16_t)((uint32_t)v >> 16);
+
+    if (r0m != 0) {
+        /* R1, and the cosine samples kept rather than recomputed below */
+        int64_t acc = 0;
+        int32_t step = ambe_asr_hw(
+            (int32_t)((uint32_t)((int32_t)pitch * 0x200) * 2u), 4);
+        int32_t ph = step;
+        uint32_t lo, hi, mlo, mhi;
+        int16_t shift = 0;
+        int32_t mant;
+
+        if (count >= 1) {
+            n = (int)((((uint32_t)(uint16_t)count - 1) & 0xffff) + 1);
+            for (i = 0; i < n; i++) {
+                int16_t c  = ambe_cos512_q15[ambe_asr_hw(ph, 16)];
+                int16_t sq = (int16_t)ambe_asr_hw(
+                    (int32_t)((uint32_t)((int32_t)amps[i] * (int32_t)amps[i])
+                              * 2u), 16);
+
+                cosk[i] = c;
+                acc += (int64_t)(int32_t)((uint32_t)((int32_t)sq * (int32_t)c)
+                                          * 2u);
+                ph += step;
+            }
+        }
+        /* the same one's-complement normalisation ambe_dot_norm does, inlined
+           in the stock code because the accumulator never leaves registers */
+        lo = (uint32_t)acc;
+        hi = (uint32_t)((uint64_t)acc >> 32);
+        if (hi != 0 || lo != 0) {
+            mhi = hi;
+            mlo = lo;
+            if ((int32_t)hi < 0) {
+                mhi = ~hi;
+                mlo = ~lo;
+            }
+            shift = (int16_t)(mhi != 0 ? (int)ambe_lzcount32(mhi) - 33
+                                       : (int)ambe_lzcount32(mlo) - 1);
+        }
+        if (shift >= 0)
+            mant = ambe_lsl_hw((int32_t)lo, shift);
+        else if (-shift >= 32)
+            mant = ambe_asr_hw((int32_t)hi, -shift - 32);
+        else
+            mant = (int32_t)((lo >> -shift)
+                             | (uint32_t)ambe_shl32((int32_t)(hi << 1),
+                                                    31 + shift));
+        r1m = (uint16_t)((uint32_t)mant >> 16);
+        if (r1m == 0x8000)
+            r1m = 0x8001;               /* the one saturation in the function */
+        e_r1 = (int16_t)((int16_t)(2 * e_in) - shift);
+    }
+
+    /* the caller's reference energy: 0.95 of it plus 0.8 of R0 at 2^-4, both
+       aligned to the larger exponent, and a fixed 0x7FFF at -0x11 whenever the
+       result will not normalise or falls below that floor */
+    {
+        int16_t m = e_r0;
+        int32_t a, b, sum;
+        int ok = 0;
+
+        if (e_r0 < *ref_exp)
+            m = *ref_exp;
+        a  = (int32_t)((uint32_t)((int32_t)*ref_mant * 0x799a) * 2u);
+        sh = (int16_t)(*ref_exp - m);
+        a  = sh < 0 ? ambe_asr_hw(a, -sh) : ambe_lsl_hw(a, sh);
+        b  = (int32_t)((uint32_t)((int32_t)(int16_t)r0m * 0x6666) * 2u);
+        sh = (int16_t)((int16_t)(e_r0 - 4) - m);
+        b  = sh < 0 ? ambe_asr_hw(b, -sh) : ambe_lsl_hw(b, sh);
+        sum = (int32_t)((uint32_t)b + (uint32_t)a);
+
+        if (sum != 0) {
+            int s = ambe_nsh(sum);
+            int32_t norm = ambe_lsl_hw(sum, s);
+            int16_t e = (int16_t)(m - s);
+
+            if (norm != 0 && e >= -0x10) {
+                *ref_mant = (int16_t)((uint32_t)norm >> 16);
+                *ref_exp  = e;
+                ok = 1;
+            }
+        }
+        if (!ok) {
+            *ref_mant = 0x7fff;
+            *ref_exp  = -0x11;
+        }
+    }
+
+    if ((int16_t)r0m < 1)
+        return;
+
+    {
+        int16_t e2 = (int16_t)(2 * e_r0 + 1);
+        int32_t sq0, num = 0;
+        uint16_t rsum = 0;
+        /* the numerator's two halves as block floats: A is (R0^2 + R1^2) over
+           the denominator, B the 2*R0*R1 the cosine multiplies */
+        int16_t am = 0x7fff, ae = 0, bm = 0, be = 0;
+        int have = 1;
+
+        sh  = (int16_t)((int16_t)(2 * e_r0) - e2);       /* -1, always */
+        sq0 = (int32_t)((uint32_t)((int32_t)(int16_t)r0m
+                                   * (int32_t)(int16_t)r0m) * 2u);
+        sq0 = sh < 0 ? ambe_asr_hw(sq0, -sh) : ambe_lsl_hw(sq0, sh);
+
+        if (r1m == 0) {
+            rsum = (uint16_t)((uint32_t)sq0 >> 16);
+            num  = mee_denominator(rsum, r0m, pitch);
+        } else {
+            int32_t sq1;
+            uint16_t rdiff;
+
+            sh  = (int16_t)((int16_t)(2 * e_r1) - e2);
+            sq1 = (int32_t)((uint32_t)((int32_t)(int16_t)r1m
+                                       * (int32_t)(int16_t)r1m) * 2u);
+            sq1 = sh < 0 ? ambe_asr_hw(sq1, -sh) : ambe_lsl_hw(sq1, sh);
+            rdiff = (uint16_t)(((uint32_t)sq0 - (uint32_t)sq1) >> 16);
+            if (rdiff == 0) {
+                /* R0^2 and R1^2 agree to the top 16 bits - a single harmonic,
+                   or one that dominates - and the whole weight collapses to a
+                   flat 0x7FFF rather than dividing by nothing */
+                have = 0;
+            } else {
+                rsum = (uint16_t)(((uint32_t)sq1 + (uint32_t)sq0) >> 16);
+                num  = mee_denominator(rdiff, r0m, pitch);
+            }
+        }
+
+        if (have) {
+            int32_t at, bt;
+            int16_t t, recip, ebase;
+            int s = num != 0 ? ambe_nsh(num) : 0;
+            int16_t d = (int16_t)ambe_asr_hw(ambe_lsl_hw(num, s), 16);
+
+            /* `divs` traps on a zero divisor, so a zero here cannot come from
+               anything the caller produces - a zero pitch would do it.  Zero
+               rather than dividing by it, as ambe_float_div_exp does. */
+            recip = d != 0 ? (int16_t)ambe_sdiv_half(MEE_NUMERATOR, d) : 0;
+            ebase = (int16_t)((int16_t)(4 - (int16_t)(e2 + e_r0))
+                              - (int16_t)(-s));
+
+            at = (int32_t)((uint32_t)((int32_t)recip
+                                      * (int32_t)(int16_t)rsum) * 2u);
+            if (at == 0) {
+                am = 0;
+                ae = 0;
+            } else {
+                int s2 = ambe_nsh(at);
+
+                am = (int16_t)((uint32_t)ambe_lsl_hw(at, s2) >> 16);
+                ae = (int16_t)(-s2);
+                if (am != 0)
+                    ae = (int16_t)(ebase + e2 - s2);
+            }
+
+            t  = (int16_t)ambe_asr_hw(
+                     (int32_t)((uint32_t)((int32_t)(int16_t)r1m
+                               * (int32_t)(int16_t)r0m) * 2u), 16);
+            t  = (int16_t)ambe_asr_hw(
+                     (int32_t)((uint32_t)((int32_t)recip * (int32_t)t) * 2u), 16);
+            bt = (int32_t)((uint32_t)((int32_t)t * 0x4000) * 2u);
+            if (bt == 0) {
+                bm = 0;
+                be = 0;
+            } else {
+                int s3 = ambe_nsh(bt);
+
+                bm = (int16_t)((uint32_t)ambe_lsl_hw(bt, s3) >> 16);
+                be = (int16_t)(-s3);
+                if (bm != 0)
+                    be = (int16_t)(ebase + e_r0 + e_r1 + 2 - s3);
+            }
+        }
+
+        {
+            int16_t half = (int16_t)((((uint32_t)(int32_t)count) & 0x7ffff) >> 3);
+            int16_t top;
+
+            /* the low band: halved, and skipped by the loop below.  The stock
+               code writes it as a 15-bit field sign-extended out of the
+               shifted halfword, which is an arithmetic >>1 and nothing more. */
+            for (i = 0; i < half; i++)
+                amps[i] = (int16_t)ambe_asr_hw((int32_t)amps[i], 1);
+
+            top = (int16_t)((be < ae) ? ae + 1 : be + 1);
+            if (half < count) {
+                int16_t sha = (int16_t)(ae - top);
+                int16_t shb = (int16_t)(be - top);
+                int32_t ahi  = ambe_shl32((int32_t)am, 16);
+                /* loop-invariant, and the stock code hoists BOTH directions
+                   out and picks between them per iteration with a sign test */
+                int32_t asel = sha < 0 ? ambe_asr_hw(ahi, -sha)
+                                       : ambe_lsl_hw(ahi, sha);
+                int16_t k = half;
+
+                do {
+                    int32_t bterm = (int32_t)((uint32_t)((int32_t)cosk[k]
+                                              * (int32_t)bm) * 2u);
+                    int32_t diff;
+                    int16_t g = 0;
+
+                    bterm = shb < 0 ? ambe_asr_hw(bterm, -shb)
+                                    : ambe_lsl_hw(bterm, shb);
+                    diff  = (int32_t)((uint32_t)asel - (uint32_t)bterm);
+                    if (diff != 0) {
+                        int16_t se = top;
+                        uint32_t r = ambe_float_sqrt(diff, &se);
+
+                        se = (int16_t)(se + *exp_io);
+                        r  = ambe_float_sqrt(
+                                 (int32_t)((uint32_t)((int32_t)(int16_t)(r >> 16)
+                                           * (int32_t)amps[k]) * 2u), &se);
+                        if (se < 2) {
+                            int16_t d2 = (int16_t)(se - 1);
+
+                            g = d2 < 0
+                                ? (int16_t)((uint32_t)ambe_asr_hw((int32_t)r,
+                                                                  -d2) >> 16)
+                                : (int16_t)((uint32_t)ambe_lsl_hw((int32_t)r,
+                                                                  d2) >> 16);
+                        } else {
+                            g = 0x4ccd;
+                        }
+                    }
+                    if (g >= 0x4cce)
+                        g = 0x4ccd;
+                    else if (g < 0x2000)
+                        g = 0x2000;
+                    amps[k] = (int16_t)ambe_asr_hw(
+                        (int32_t)((uint32_t)((int32_t)g * (int32_t)amps[k])
+                                  * 2u), 16);
+                    k = (int16_t)(k + 1);
+                } while (k < count);
+            }
+        }
+    }
+
+    /* and the wash: renormalise, measure R0 again, and put back the energy the
+       weights took out */
+    *exp_io = (int16_t)(*exp_io + 1);
+    ambe_normalize_array(amps, amps, count, exp_io);
+    {
+        int16_t e3, oe = 0, gm;
+        uint16_t r0b, q;
+        uint32_t rt;
+
+        v   = ambe_dot_norm(&e3, amps, amps, count);
+        e3  = (int16_t)((int16_t)(2 * *exp_io) + e3);
+        r0b = (uint16_t)((uint32_t)v >> 16);
+        if (r0b == 0)
+            return;
+        q  = ambe_float_div_exp(ambe_shl32((int32_t)(int16_t)r0m, 16), e_r0,
+                                (int32_t)(int16_t)r0b, e3, &oe);
+        rt = ambe_float_sqrt(ambe_shl32((int32_t)q, 16), &oe);
+        gm = (int16_t)(rt >> 16);
+
+        if (count >= 1) {
+            n = (int)((((uint32_t)(uint16_t)count - 1) & 0xffff) + 1);
+            for (i = 0; i < n; i++)
+                amps[i] = (int16_t)ambe_asr_hw((int32_t)amps[i] * (int32_t)gm,
+                                               15);
+        }
+        *exp_io = (int16_t)(*exp_io + oe);
+        if (*exp_io > 0) {
+            ambe_array_shift_saturate(amps, amps, count, *exp_io, 0);
+            *exp_io = 0;
+        }
+    }
 }

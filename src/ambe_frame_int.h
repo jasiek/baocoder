@@ -53,6 +53,14 @@ void ambe_update_pitch_history(int16_t *params, uint16_t *flags, int16_t cand);
    harmonic axis.  `dst` is 0x38 shorts; the tail past `count` is zeroed. */
 void ambe_hilbert_transform(int16_t *dst, const int16_t *src, int count);
 
+/* Vocoder_MatchExcitationEnergy 0x000277F8: the IMBE spectral amplitude
+   enhancement.  `amps` is 0x38 shorts at the block exponent `exp_io`, both
+   rewritten in place; `ref_mant`/`ref_exp` are the caller's running reference
+   energy, read and rewritten and not used here. */
+void ambe_match_excitation_energy(int16_t *amps, int16_t *exp_io,
+                                  int16_t *ref_mant, int16_t *ref_exp,
+                                  int16_t pitch, int16_t count);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

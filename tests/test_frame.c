@@ -16,9 +16,12 @@
  *   Dsp_HilbertTransform      0x00029D1C   here
  *   Dsp_NormalizeArray        0x0001ADA0   here
  *   Math_ArrayShiftSaturate   0x0001AF5C   here
+ *   Vocoder_MatchExcitationEnergy 0x000277F8  here
  *
  * SPDX-License-Identifier: ISC
  */
+#include <string.h>
+
 #include "ambe.h"
 #include "ambe_basop.h"
 #include "ambe_frame_int.h"
@@ -462,6 +465,105 @@ int main(void)
         CHECK(qok == qn, "Math_ArrayShiftSaturate exact on %d of %d\n", qok, qn);
         printf("[Math_ArrayShiftSaturate %d/%d bit-exact, %d values saturated] ",
                qok, qn, sat);
+    }
+
+    {   /* Vocoder_MatchExcitationEnergy: the spectral amplitude enhancement.
+           Everything it does is in place - the amplitudes, the block exponent
+           and the caller's reference pair - so all three are checked, and the
+           reference pair matters most: it is the only state the function
+           keeps, and nothing inside it reads what it writes there, so a
+           transcription could get it wrong and still sound right. */
+        FILE *g = fixture_open("frame_matchenergy.fw");
+        int mn = 0, mok = 0, silent = 0, both = 0, moved = 0, built = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t src[0x38], ref[0x38], got[0x38];
+            long count, pitch, ein, rmi, rei, eo, rmo, reo;
+            int16_t e, rm, re;
+            char *p = line;
+            int k, bad = 0, allzero = 1;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            pitch = strtol(p, &p, 10);
+            ein   = strtol(p, &p, 10);
+            rmi   = strtol(p, &p, 10);
+            rei   = strtol(p, &p, 10);
+            for (k = 0; k < 0x38; k++) src[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 0x38; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+            eo  = strtol(p, &p, 10);
+            rmo = strtol(p, &p, 10);
+            reo = strtol(p, &p, 10);
+
+            memcpy(got, src, sizeof got);
+            e  = (int16_t)ein;
+            rm = (int16_t)rmi;
+            re = (int16_t)rei;
+            ambe_match_excitation_energy(got, &e, &rm, &re, (int16_t)pitch,
+                                         (int16_t)count);
+            if (e != (int16_t)eo) {
+                CHECK(0, "matchenergy case %d (count %ld pitch %ld): block "
+                         "exponent %d, firmware %ld\n", mn, count, pitch,
+                      (int)e, eo);
+                bad = 1;
+            }
+            if (!bad && (rm != (int16_t)rmo || re != (int16_t)reo)) {
+                CHECK(0, "matchenergy case %d (count %ld pitch %ld): reference "
+                         "%d@%d, firmware %ld@%ld\n", mn, count, pitch,
+                      (int)rm, (int)re, rmo, reo);
+                bad = 1;
+            }
+            for (k = 0; k < 0x38 && !bad; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "matchenergy case %d (count %ld pitch %ld) "
+                             "harmonic %d: %d, firmware %d\n", mn, count,
+                          pitch, k, (int)got[k], (int)ref[k]);
+                    bad = 1;
+                }
+            if (!bad)
+                mok++;
+            for (k = 0; k < count; k++) {
+                if (src[k] != 0)
+                    allzero = 0;
+                if (ref[k] != src[k])
+                    moved = 1;
+            }
+            if (allzero)
+                silent++;              /* R0 is zero: the early return */
+            if (count > 8)
+                both++;                /* a halved low band AND an enhanced one */
+            {   /* the constructed cases: every harmonic at full scale but one,
+                   which is what drives R1's mantissa onto 0x8000 exactly */
+                int other = 0;
+
+                for (k = 0; k < count; k++)
+                    if (src[k] != 0x7fff)
+                        other++;
+                if (count >= 16 && other == 1)
+                    built++;
+            }
+            mn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(mn > 350, "only %d excitation-match cases\n", mn);
+        CHECK(silent > 0, "no silent block, so the early return on a zero R0 "
+                          "is untested\n");
+        CHECK(both > 20, "only %d cases with a low band and an enhanced band "
+                         "both\n", both);
+        CHECK(moved, "no case changed an amplitude at all\n");
+        CHECK(built >= 10, "only %d constructed cases, so the one saturation "
+                           "in the function - R1's mantissa at 0x8000 - is "
+                           "untested; a random sweep does not reach it\n",
+              built);
+        CHECK(mok == mn, "Vocoder_MatchExcitationEnergy exact on %d of %d\n",
+              mok, mn);
+        printf("[Vocoder_MatchExcitationEnergy %d/%d bit-exact, amplitudes, "
+               "block exponent and reference pair, %d silent and %d "
+               "constructed for the R1 saturation] ", mok, mn, silent, built);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

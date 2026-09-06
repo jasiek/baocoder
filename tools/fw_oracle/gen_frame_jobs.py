@@ -29,6 +29,7 @@ HILBERT  = 0x00029D1C
 SHIFTCPY = 0x0001AB58
 NORMARR  = 0x0001ADA0
 SHIFTSAT = 0x0001AF5C
+MATCH    = 0x000277F8
 NEXP     = 0x00051A00
 ASRC     = 0x00051800
 ADST     = 0x00051900
@@ -38,6 +39,10 @@ PARAMS   = 0x00051200
 FLAGS    = 0x00051400
 BLK      = 0x00051000
 EXPO     = 0x00051100
+MAMP     = 0x00051B00
+MEXP     = 0x00051C00
+MREFM    = 0x00051C10
+MREFE    = 0x00051C20
 
 
 def _popcount_cases():
@@ -308,6 +313,182 @@ def _shiftsat_cases():
     return out
 
 
+def _match_cases():
+    """(56 amplitudes, blockExp, refMant, refExp, pitch, count).
+
+    Vocoder_MatchExcitationEnergy 0x000277F8, the spectral amplitude
+    enhancement.  Three axes decide it and each needs its own end of a range:
+
+      the harmonic count, because the low L/8 is halved and skipped, so a count
+      below eight has no enhanced band at all and a count of 1 has no low band;
+
+      the pitch, because it is the phase step into the cosine table - l*w0
+      lands on index l*pitch/1024, and the stock code does not mask that index,
+      so the cases have to keep L*w0 under pi, which is where a real frame's
+      pitch always sits and is half the table;
+
+      and the amplitudes, because R1 = sum M^2 cos(l*w0) is what separates a
+      flat envelope, where R1 approaches R0 and the weight collapses, from a
+      decaying one.
+
+    The lower bound on L*pitch is not tidiness.  The enhancement divides by
+    w0*R0*(R0^2 - R1^2) and the stock code has no guard on it: when L*w0 is
+    small enough that the cosine weighting is indistinguishable from unity,
+    R0^2 - R1^2 underflows the 16 bits it is normalised into, the divisor
+    reaches Math_SDivHalf as zero and `divs` traps.  A first sweep with pitches
+    down to 64 faulted on 14 of 320 cases that way, and it is not only the
+    pitch that gets there: one harmonic dominating the envelope makes
+    R1 = R0*cos(k*w0) for that k alone, so R0^2 - R1^2 goes as sin^2(k*w0) and
+    collapses the same way when the dominant harmonic sits low.  A real frame
+    is nowhere near either - its harmonics fill the band, L*w0 is close to pi -
+    so the floor here is L*w0 >= pi/8, which clears every case that faulted
+    with room to spare.  The pitch also has to fit a halfword: the stock code
+    reads it with `ld.h`, so 0x10000 arrives as a zero pitch and traps on the
+    same divide.
+    """
+    out = []
+    x = 77213
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    def amps(f):
+        return [f(i) for i in range(0x38)]
+
+    LO, HI, PMAX = 0x8000, 0x40000, 0x8000   # L*w0 in [pi/8, pi]; pitch is a short
+    shapes = [
+        lambda i: 0,                                    # silent: R0 is zero
+        lambda i: 0x2000,                               # flat
+        lambda i: 0x7FFF,                               # full scale
+        lambda i: max(1, 0x7FFF >> (i // 4)),           # decaying
+        lambda i: (i * 0x200) & 0x7FFF,                 # rising
+        lambda i: 0x4000 if (i & 1) else 0x100,         # alternating
+        lambda i: -0x7FFF + i * 0x100,                  # signed
+        lambda i: 0x7FFF if i == 3 else 0x40,           # one dominant harmonic
+    ]
+    def band(count):
+        """The pitches that keep L*w0 in [pi/8, pi] and fit a halfword.  A
+        count of 1 cannot reach pi/8 at all - one harmonic times the largest
+        pitch a short holds is just under it - so its floor is that pitch."""
+        return (min((LO + count - 1) // count, PMAX - 1),
+                min(HI // count, PMAX - 1))
+
+    for f in shapes:
+        for count in (1, 2, 8, 9, 16, 0x2d, 0x37, 0x38):
+            lo, hi = band(count)
+            for num, den in ((1, 16), (1, 4), (1, 2), (15, 16)):
+                pitch = min(max((HI * num // den + count - 1) // count, lo), hi)
+                out.append((amps(f), 0, 0x4000, 0, pitch, count))
+    # the block exponent and the caller's reference pair, which the energies
+    # are carried against and which the floor at -0x11 is measured from
+    for e in (0, 1, -1, 8, -8, 15, -20):
+        for rm, re in ((0, 0), (1, -0x11), (0x7FFF, 5), (-0x8000, -30),
+                       (0x4000, 30)):
+            out.append((amps(lambda i: max(1, 0x6000 >> (i // 6))), e, rm, re,
+                        0x2000, 0x20))
+    while len(out) < 340:
+        count = 1 + rnd(0x38)
+        lo, hi = band(count)
+        pitch = lo + rnd(hi - lo + 1)
+        out.append(([rnd(0x10000) - 0x8000 for _ in range(0x38)],
+                    rnd(41) - 20, rnd(0x10000) - 0x8000, rnd(41) - 20,
+                    pitch, count))
+    out += _match_saturating_cases()
+    return out
+
+
+def _match_saturating_cases(per_count=3):
+    """Cases that drive R1's normalised mantissa to exactly 0x8000.
+
+    The weighted energy R1 = sum M^2 cos(l*w0) is the one place in the function
+    that saturates: a mantissa of 0x8000 is rewritten to 0x8001, because
+    everything downstream reads it back with `mulsh`, where 0x8000 is -32768
+    and would flip the sign of the correction.  A random sweep does not reach
+    it - the window is 2^16 wide in a 2^30 range - so these are constructed,
+    the way tests/test_voiced.c's octave-repair cases are.
+
+    The construction: R1 normalises to 0x8000xxxx exactly when the accumulator
+    lands just below a power of two, so start from every harmonic at full
+    scale, which fixes R0, and tune ONE harmonic until the weighted sum lands
+    in [-2^k, -2^k + 2^(k-15)).  It has to be one harmonic and not the whole
+    envelope: making R1 as large as R0 also makes R0^2 - R1^2 collapse, which
+    takes the branch that never reads R1 at all, and the case then proves
+    nothing.  R0 stays two orders of magnitude above R1 here.
+    """
+    with open(emu.FIRMWARE, "rb") as fh:
+        fh.seek(emu.SRAM_FILE_OFF + 0x1630)         # g_awSineTable512
+        cos = list(struct.unpack("<512h", fh.read(1024)))
+
+    def s16(v):
+        v &= 0xFFFF
+        return v - 0x10000 if v & 0x8000 else v
+
+    def s32(v):
+        v &= 0xFFFFFFFF
+        return v - 0x100000000 if v & 0x80000000 else v
+
+    def sq_of(a):
+        return s16(s32(s32(a * a) * 2) >> 16)
+
+    def term(sq, c):
+        return s32(s32(sq * c) * 2)
+
+    def top_half(acc):
+        """the high half of the normalised mantissa, as the function makes it"""
+        lo, hi = acc & 0xFFFFFFFF, (acc >> 32) & 0xFFFFFFFF
+        if not (lo or hi):
+            return 0
+        mhi, mlo = hi, lo
+        if hi & 0x80000000:
+            mhi, mlo = ~hi & 0xFFFFFFFF, ~lo & 0xFFFFFFFF
+        lzc = lambda x: 32 if x == 0 else 32 - x.bit_length()
+        sh = lzc(mhi) - 33 if mhi else lzc(mlo) - 1
+        if sh >= 0:
+            mant = 0 if sh >= 32 else (lo << sh) & 0xFFFFFFFF
+        elif -sh >= 32:
+            mant = ((hi - (1 << 32) if hi >> 31 else hi) >> (-sh - 32)) & 0xFFFFFFFF
+        else:
+            mant = ((lo >> -sh) | (hi << 1 << (31 + sh))) & 0xFFFFFFFF
+        return mant >> 16
+
+    first = {}
+    for a in range(0x8000):
+        first.setdefault(sq_of(a), a)
+
+    out = []
+    for count in (0x38, 0x30, 0x20, 0x18, 0x10):
+        got = 0
+        for pitch in range(min(0x7FFF, 0x40000 // count), 0x8000 // count, -1):
+            step = s32(s32(pitch * 0x200) * 2) >> 4
+            cs = [cos[((k + 1) * step) >> 16] for k in range(count)]
+            full = sum(term(sq_of(0x7FFF), c) for c in cs)
+            for j in range(count):
+                if cs[j] == 0 or got >= per_count:
+                    continue
+                rest = full - term(sq_of(0x7FFF), cs[j])
+                for k in range(18, 31):
+                    sq = (-(1 << k) - rest) // (2 * cs[j])
+                    for cand in (sq - 1, sq, sq + 1):
+                        if not 0 <= cand <= 0x7FFE or cand not in first:
+                            continue
+                        a = [0x7FFF] * count + [0] * (0x38 - count)
+                        a[j] = first[cand]
+                        acc = sum(term(sq_of(a[i]), cs[i]) for i in range(count))
+                        if top_half(acc) == 0x8000:
+                            out.append((a, 0, 0x4000, 0, pitch, count))
+                            got += 1
+                            break
+                    if got >= per_count:
+                        break
+                if got >= per_count:
+                    break
+            if got >= per_count:
+                break
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -360,6 +541,17 @@ def gen(jobfile):
         j.call(SHIFTSAT, ADST, ASRC, count & 0xFFFFFFFF, de & 0xFFFFFFFF,
                se & 0xFFFFFFFF)
         j.peek("ss%d" % i, ADST, 32 * 2)
+    for i, (a, e, rm, re, pitch, count) in enumerate(_match_cases()):
+        j.poke(MAMP,  struct.pack("<56h", *a))
+        j.poke(MEXP,  struct.pack("<h", e))
+        j.poke(MREFM, struct.pack("<h", rm))
+        j.poke(MREFE, struct.pack("<h", re))
+        j.call(MATCH, MAMP, MEXP, MREFM, MREFE, pitch & 0xFFFF,
+               count & 0xFFFF)
+        j.peek("ma%d" % i, MAMP, 56 * 2)
+        j.peek("mx%d" % i, MEXP, 2)
+        j.peek("mm%d" % i, MREFM, 2)
+        j.peek("mr%d" % i, MREFE, 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -493,6 +685,25 @@ def export(outfile, destdir):
             fh.write("%d %d %d %s %s\n" % (count, de, se,
                                             " ".join(map(str, vals)),
                                             " ".join(map(str, o))))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_matchenergy.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_MatchExcitationEnergy 0x000277F8, executed under the\n"
+                 "# p-code emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count pitch blockExp refMant refExp, 56 amplitudes\n"
+                 "# in, then the 56 written back, the block exponent, and the\n"
+                 "# reference pair it left behind.\n")
+        m = 0
+        for i, (a, e, rm, re, pitch, count) in enumerate(_match_cases()):
+            o  = struct.unpack("<56h", res["peek"]["ma%d" % i][0])
+            eo = struct.unpack("<h", res["peek"]["mx%d" % i][0])[0]
+            mo = struct.unpack("<h", res["peek"]["mm%d" % i][0])[0]
+            ro = struct.unpack("<h", res["peek"]["mr%d" % i][0])[0]
+            fh.write("%d %d %d %d %d %s %s %d %d %d\n" % (
+                count, pitch, e, rm, re, " ".join(map(str, a)),
+                " ".join(map(str, o)), eo, mo, ro))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
