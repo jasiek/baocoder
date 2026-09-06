@@ -7,6 +7,7 @@
  * decoder produces.  This grows a function at a time, leaves first, each swept
  * before the one above it is written.
  *
+ *   Math_ArrayShiftCopy       0x0001AB58   here
  *   Math_PopCountBits         0x000189F4   here
  *   Vocoder_SmoothPitchState  0x00022D7C   here
  *   Math_Pow2Scaled           0x00019280   here
@@ -294,6 +295,59 @@ int main(void)
         CHECK(tok == tn, "Dsp_HilbertTransform exact on %d of %d\n", tok, tn);
         printf("[Dsp_HilbertTransform %d/%d bit-exact, %d long enough to reach "
                "past 0x40] ", tok, tn, longblk);
+    }
+
+    {   /* Math_ArrayShiftCopy.  The destination was poked 0xEEEE, so a slot
+           the firmware left alone reads as -4370 rather than as a chosen zero,
+           which is what catches a transcription copying too many. */
+        FILE *g = fixture_open("frame_shiftcopy.fw");
+        int cn = 0, cok = 0, lost = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t src[32], ref[32], got[32];
+            long count, shift;
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            shift = strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) src[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+
+            for (k = 0; k < 32; k++)
+                got[k] = (int16_t)0xEEEE;
+            ambe_array_shift_copy(got, src, (int)count, (int)shift);
+            for (k = 0; k < 32; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "shiftcopy case %d (count %ld shift %ld) slot %d: "
+                             "%d, firmware %d\n", cn, count, shift, k,
+                          (int)got[k], (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                cok++;
+            /* a left shift that pushes bits out of the short: the case where
+               truncating and saturating differ */
+            if (shift > 0)
+                for (k = 0; k < count; k++)
+                    if ((int32_t)src[k] << shift != (int32_t)(int16_t)
+                        ((uint32_t)src[k] << shift))
+                        lost++;
+            cn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(cn > 200, "only %d shift-copy cases\n", cn);
+        CHECK(lost > 0, "no left shift pushes bits out of the short, where "
+                        "truncating and saturating would look the same\n");
+        CHECK(cok == cn, "Math_ArrayShiftCopy exact on %d of %d\n", cok, cn);
+        printf("[Math_ArrayShiftCopy %d/%d bit-exact, %d values shifted past "
+               "the top] ", cok, cn, lost);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

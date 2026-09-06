@@ -12,6 +12,10 @@
 
 #include <stdint.h>
 
+/* Math_ArrayShiftCopy 0x0001AB58: copy n shorts, shifting each by `shift` -
+   left when positive, arithmetic right when negative. */
+void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift);
+
 /* Math_PopCountBits 0x000189F4: the population count of the low `n` bits. */
 int ambe_popcount_bits(uint32_t x, int n);
 

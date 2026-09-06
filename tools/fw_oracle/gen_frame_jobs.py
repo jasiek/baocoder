@@ -26,6 +26,9 @@ POW2SC   = 0x00019280
 NORMBLK  = 0x00022C18
 PITCHHIST = 0x0001A9E8
 HILBERT  = 0x00029D1C
+SHIFTCPY = 0x0001AB58
+ASRC     = 0x00051800
+ADST     = 0x00051900
 HSRC     = 0x00051600
 HDST     = 0x00051700
 PARAMS   = 0x00051200
@@ -211,6 +214,31 @@ def _hilbert_cases():
     return out
 
 
+def _shiftcopy_cases():
+    """(count, shift, 32 source values).
+
+    The shift is applied to a sign-extended short and truncated back, so a left
+    shift discards the top rather than saturating - which is only visible on
+    values whose high bits are set.  Zero is its own branch in the stock code.
+    """
+    out = []
+    vals = [0, 1, -1, 0x7FFF, -0x8000, 0x4000, -0x4000, 0x0100,
+            0x1234, -0x1234, 0x5A82, -0x5A82]
+    src = [vals[i % len(vals)] for i in range(32)]
+    for count in (0, 1, 2, 31, 32):
+        for sh in (0, 1, 2, 15, 16, 31, -1, -2, -15, -16, -31):
+            out.append((count, sh, list(src)))
+    x = 1717
+    for _ in range(200):
+        v = []
+        for _ in range(32):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(((x >> 7) & 0xFFFF) - 0x8000)
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append((1 + (x >> 7) % 32, ((x >> 3) % 41) - 20, v))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -243,6 +271,11 @@ def gen(jobfile):
         j.poke(HDST, b"\xEE" * (56 * 2))
         j.call(HILBERT, HDST, HSRC, count & 0xFFFFFFFF)
         j.peek("hb%d" % i, HDST, 56 * 2)
+    for i, (count, sh, vals) in enumerate(_shiftcopy_cases()):
+        j.poke(ASRC, struct.pack("<32h", *vals))
+        j.poke(ADST, b"\xEE" * (32 * 2))
+        j.call(SHIFTCPY, ADST, ASRC, count & 0xFFFFFFFF, sh & 0xFFFFFFFF)
+        j.peek("sc%d" % i, ADST, 32 * 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -331,6 +364,21 @@ def export(outfile, destdir):
             o = struct.unpack("<56h", res["peek"]["hb%d" % i][0])
             fh.write("%d %s %s\n" % (count, " ".join(map(str, vals)),
                                       " ".join(map(str, o))))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_shiftcopy.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Math_ArrayShiftCopy 0x0001AB58, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count shift, 32 source values, then the 32 written.\n"
+                 "# The destination is poked 0xEEEE first, so a slot the firmware\n"
+                 "# left alone reads as -4370 rather than as a zero it chose.\n")
+        m = 0
+        for i, (count, sh, vals) in enumerate(_shiftcopy_cases()):
+            o = struct.unpack("<32h", res["peek"]["sc%d" % i][0])
+            fh.write("%d %d %s %s\n" % (count, sh, " ".join(map(str, vals)),
+                                         " ".join(map(str, o))))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)

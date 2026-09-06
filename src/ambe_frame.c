@@ -11,6 +11,7 @@
  *
  * Being written leaves-first like the voiced synthesiser was:
  *
+ *   Math_ArrayShiftCopy                0x0001AB58   here
  *   Math_PopCountBits                  0x000189F4   here
  *   Math_SqrtScaled                    0x000193E0   here
  *   Vocoder_CopyFrameParamsWithReset   0x00019CBC   here
@@ -408,4 +409,31 @@ void ambe_hilbert_transform(int16_t *dst, const int16_t *src, int count)
                             + (((uint32_t)acc * 2) & 0x7fffffffu)) >> 16);
     }
     memset(dst + count, 0, (size_t)(int16_t)(0x38 - count) * sizeof(int16_t));
+}
+
+/*
+ * Math_ArrayShiftCopy 0x0001AB58.
+ *
+ * Copy `n` shorts, shifting each by `shift` - left when positive, arithmetic
+ * right when negative, and a plain copy at zero, which the stock code branches
+ * out to rather than shifting by nothing.
+ *
+ * The shift is applied to the sign-extended short and the result truncated back
+ * to 16 bits, so a left shift discards the top rather than saturating.  That is
+ * what makes the caller's leading-zero count load-bearing: Dsp_NormalizeArray
+ * chooses a shift that cannot overflow, and nothing here would catch it if it
+ * chose wrong.
+ */
+void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (shift == 0)
+            dst[i] = src[i];
+        else if (shift < 0)
+            dst[i] = (int16_t)ambe_asr_hw((int32_t)src[i], -shift);
+        else
+            dst[i] = (int16_t)ambe_lsl_hw((int32_t)src[i], shift);
+    }
 }
