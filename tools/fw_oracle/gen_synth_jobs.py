@@ -397,3 +397,67 @@ def export_voiced(outfile, dest):
             n += 1
     print("%s: %d voiced calls" % (dest, n))
     return n
+
+
+def export_frame(outfile, dest):
+    """Write Vocoder_SynthesizeFrame 0x00019DB8's arguments, output and state.
+
+    The oracle for the layer between the decoded parameters and the two
+    synthesisers.  `export` above already writes the block and the 80 samples,
+    which is enough to measure the function but not to REPLAY it: it reads and
+    writes channel state at ctx+0x18, +0x172, +0x470, +0x4f8, +0x648, +0x7ba and
+    +0x7be, and a transcription handed only the block cannot reproduce any of
+    it.  So this carries the whole 0x800-byte context on both sides.
+
+    Entry is caught at 0x00019DB8, where r0 is the parameter block, r2 the
+    sample count and r3 bRepeatFrame; the samples are read at 0x00016D5A from
+    the ring, at the offset r1 held at entry.  Both blocks the caller might have
+    passed are peeked and r0 says which was used - the interpolated one for the
+    first 80-sample half of every frame, PARAMS+0x000 for the second.
+    """
+    stops, cur = [], None
+    for line in open(outfile):
+        line = line.strip()
+        if line.startswith("BREAK "):
+            cur = {"pc": int(line.split()[1], 16), "r": {}, "p": {}}
+            stops.append(cur)
+        elif line.startswith("REG ") and cur is not None:
+            _, n, h = line.split()
+            cur["r"][n] = int(h, 16)
+        elif line.startswith("PEEK ") and cur is not None:
+            _, n, h = line.split()
+            cur["p"][n.rstrip("0123456789")] = bytes.fromhex(h)
+
+    n = 0
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeFrame 0x00019DB8, every call over the capture.\n"
+                 "# per record: src(0=interpolated 1=PARAMS+0) repeat nSampleCount,\n"
+                 "#   68 shorts of the input parameter block, %d bytes of channel\n"
+                 "#   context before as shorts, the 80 samples produced, then the\n"
+                 "#   same context after.  The context is the whole of it rather\n"
+                 "#   than the seven fields this function is known to touch: an\n"
+                 "#   eighth would otherwise be found the hard way.\n" % CTX_LEN)
+        for i, st in enumerate(stops):
+            if st["pc"] != BRK_SYNTH_IN:
+                continue
+            j = i + 1
+            while j < len(stops) and stops[j]["pc"] != BRK_SYNTH_OUT:
+                j += 1
+            if j >= len(stops):
+                break
+            src = 0 if st["r"]["r0"] == BLK_INTERP else 1
+            blk = st["p"]["bi" if src == 0 else "bp"]
+            off = st["r"]["r1"] - RING
+            nctx = CTX_LEN // 2
+            fh.write("%d %d %d %s %s %s %s\n" % (
+                src, st["r"]["r3"], st["r"].get("r2", 0x50),
+                " ".join(str(x) for x in struct.unpack_from("<68h", blk, 0)),
+                " ".join(str(x) for x in struct.unpack_from("<%dh" % nctx,
+                                                            st["p"]["ctx"], 0)),
+                " ".join(str(x) for x in struct.unpack("<80h",
+                                                       stops[j]["p"]["ring"][off:off + 160])),
+                " ".join(str(x) for x in struct.unpack_from("<%dh" % nctx,
+                                                            stops[j]["p"]["ctx"], 0))))
+            n += 1
+    print("%s: %d frame calls" % (dest, n))
+    return n

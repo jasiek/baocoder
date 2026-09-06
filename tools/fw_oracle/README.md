@@ -175,6 +175,31 @@ recording the firmware scribbling. The caller cannot produce such a start, so
 the sweep filters them out by re-deriving the start index in Python, and the
 test asserts that no case wrote past 0xA8.
 
+## The frame layer above it
+
+`gen_synth_jobs.export_frame` writes the oracle for
+`Vocoder_SynthesizeFrame 0x00019DB8`, the layer between the decoded parameters
+and the two synthesisers. `export` has always written that function's block and
+its 80 samples, which is enough to *measure* it and not enough to *replay* it:
+it reads and writes channel state at ctx+0x18, +0x172, +0x470, +0x4f8, +0x648,
++0x7ba and +0x7be, and a transcription handed only the block reproduces none of
+it. So the capture now peeks the whole 0x800-byte context at every stop and
+`export_frame` carries it on both sides.
+
+The whole context rather than those seven fields, deliberately: the list came
+from reading the decompilation, an eighth would be found the hard way, and the
+cost is output-file size in a scratch run. 617 calls, and the fixture is 5.3 MB
+of it - which is why it is not committed yet. Once the transcription exists it
+will say which of those bytes it actually touches, and the fixture can be
+trimmed to them instead of being guessed at now.
+
+```sh
+python3 tools/fw_oracle/gen_synth_jobs.py /tmp/sf.job /tmp/dm32_arc4_1.frames 360
+EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/sf.job /tmp/sf.out
+python3 -c "import sys; sys.path.insert(0,'tools/fw_oracle'); import gen_synth_jobs as G; \
+            G.export_frame('/tmp/sf.out','tests/fixtures/dm32_arc4_1.fwframe')"
+```
+
 ## The voiced synthesiser
 
 `Vocoder_SynthesizeVoiced 0x0001DE10` is the one stage of the codec with no
