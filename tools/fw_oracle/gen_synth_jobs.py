@@ -119,7 +119,7 @@ def gen(jobfile, framesfile, nframes):
             j.poke(V.TX_CTX + D.F_FILL, struct.pack("<h", D.HALF))
             j.poke(V.TX_CTX + D.F_BURST + (f % 3) * 9, frames[f])
         j.resume()
-        for r in ("r0", "r1", "r3"):
+        for r in ("r0", "r1", "r2", "r3"):
             j.getreg(r)
         j.peek("bi%d" % w, BLK_INTERP, BLK_LEN)
         j.peek("bp%d" % w, BLK_PARAMS, BLK_LEN)
@@ -400,20 +400,44 @@ def export_voiced(outfile, dest):
 
 
 def export_frame(outfile, dest):
-    """Write Vocoder_SynthesizeFrame 0x00019DB8's arguments, output and state.
+    """Write Vocoder_SynthesizeFrame 0x00019DB8's oracle: a SEQUENCE.
 
-    The oracle for the layer between the decoded parameters and the two
-    synthesisers.  `export` above already writes the block and the 80 samples,
-    which is enough to measure the function but not to REPLAY it: it reads and
-    writes channel state at ctx+0x18, +0x172, +0x470, +0x4f8, +0x648, +0x7ba and
-    +0x7be, and a transcription handed only the block cannot reproduce any of
-    it.  So this carries the whole 0x800-byte context on both sides.
+    The function is not oracled one call at a time.  Everything it produces
+    depends on channel state it also writes, so what the fixture carries is the
+    state ONCE, at the first call, and then only the per-call inputs and
+    outputs: a transcription starts from that state, runs the 617 calls in
+    order, and any divergence anywhere shows up in the samples and never
+    recovers.
 
-    Entry is caught at 0x00019DB8, where r0 is the parameter block, r2 the
-    sample count and r3 bRepeatFrame; the samples are read at 0x00016D5A from
-    the ring, at the offset r1 held at entry.  Both blocks the caller might have
-    passed are peeked and r0 says which was used - the interpolated one for the
-    first 80-sample half of every frame, PARAMS+0x000 for the second.
+    An earlier version of this function wrote the whole 0x800-byte context on
+    both sides of every call, 5.3 MB, because the extent the layer actually
+    touches was not yet known.  It is now, and measured rather than read off
+    the decompilation:
+
+      +0x000  the output filter's six words        unchanged between calls
+      +0x018  the voiced synthesiser's state       see below
+      +0x470  the previous frame's block           unchanged between calls
+      +0x4f8  the silence copy                     unchanged between calls
+      +0x648  the unvoiced synthesiser's state     unchanged between calls
+      +0x7a0  the tone mode                        constant 1 over the capture
+      +0x7ba  the bypass flags                     changed in 15 of 616 gaps
+      +0x7be  the smoothed pitch                   unchanged between calls
+      +0x7c0  the excitation match's reference     unchanged between calls
+
+    "Unchanged between calls" is the property that makes a sequence fixture
+    possible at all: nothing outside this function writes those fields, so
+    carrying them is exact.  The two that do change are recorded per call as
+    inputs - +0x7ba only bit 0 matters and it is zero on all 617, but recording
+    it costs two numbers and assuming it costs a wrong answer if it ever is not.
+
+    The voiced state is the interesting one.  Its window here is 0x22C shorts,
+    which the capture chose to reach the next structure the memory map knows
+    about; the part that changes between calls is exactly [0x1E8..0x227], and
+    nothing below it ever does.  So the state proper ends at 0x1E8 - which is
+    where reading Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8 put it, the
+    harmonic spectrum at [0xE6] running 0x100 shorts - and the rest of the
+    window belongs to something else.  It is carried anyway: if the synthesiser
+    ever read it, the sequence would say so.
     """
     stops, cur = [], None
     for line in open(outfile):
@@ -428,36 +452,52 @@ def export_frame(outfile, dest):
             _, n, h = line.split()
             cur["p"][n.rstrip("0123456789")] = bytes.fromhex(h)
 
-    n = 0
-    with open(dest, "w") as fh:
-        fh.write("# Vocoder_SynthesizeFrame 0x00019DB8, every call over the capture.\n"
-                 "# per record: src(0=interpolated 1=PARAMS+0) repeat nSampleCount,\n"
-                 "#   68 shorts of the input parameter block, %d bytes of channel\n"
-                 "#   context before as shorts, the 80 samples produced, then the\n"
-                 "#   same context after.  The context is the whole of it rather\n"
-                 "#   than the seven fields this function is known to touch: an\n"
-                 "#   eighth would otherwise be found the hard way.\n" % CTX_LEN)
-        for i, st in enumerate(stops):
-            if st["pc"] != BRK_SYNTH_IN:
-                continue
+    pairs, i = [], 0
+    while i < len(stops):
+        if stops[i]["pc"] == BRK_SYNTH_IN:
             j = i + 1
             while j < len(stops) and stops[j]["pc"] != BRK_SYNTH_OUT:
                 j += 1
-            if j >= len(stops):
-                break
-            src = 0 if st["r"]["r0"] == BLK_INTERP else 1
-            blk = st["p"]["bi" if src == 0 else "bp"]
-            off = st["r"]["r1"] - RING
-            nctx = CTX_LEN // 2
-            fh.write("%d %d %d %s %s %s %s\n" % (
-                src, st["r"]["r3"], st["r"].get("r2", 0x50),
-                " ".join(str(x) for x in struct.unpack_from("<68h", blk, 0)),
-                " ".join(str(x) for x in struct.unpack_from("<%dh" % nctx,
-                                                            st["p"]["ctx"], 0)),
-                " ".join(str(x) for x in struct.unpack("<80h",
-                                                       stops[j]["p"]["ring"][off:off + 160])),
-                " ".join(str(x) for x in struct.unpack_from("<%dh" % nctx,
-                                                            stops[j]["p"]["ctx"], 0))))
+            if j < len(stops):
+                pairs.append((i, j))
+            i = j
+        i += 1
+
+    def state(ctx):
+        return (list(struct.unpack_from("<6i", ctx, 0))
+                + list(struct.unpack_from("<%dh" % N_VST, ctx, 0x18))
+                + list(struct.unpack_from("<68h", ctx, 0x470))
+                + list(struct.unpack_from("<68h", ctx, 0x4f8))
+                + list(struct.unpack_from("<170h", ctx, 0x648))
+                + list(struct.unpack_from("<3h", ctx, 0x7be)))
+
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SynthesizeFrame 0x00019DB8, every call over the capture,\n"
+                 "# as a sequence: the channel state once and then the calls.\n"
+                 "# S: 6 filter words, %d shorts of voiced state (ctx+0x18), 68 of the\n"
+                 "#    previous block, 68 of the silence copy, 170 of unvoiced state,\n"
+                 "#    then the smoothed pitch and the reference energy pair.\n"
+                 "# C: src(0=interpolated 1=PARAMS+0) repeat nSampleCount toneMode\n"
+                 "#    bypass, 68 shorts of the input block, the 80 samples produced,\n"
+                 "#    the 68 shorts left at ctx+0x470, then the pitch and reference\n"
+                 "#    pair left behind.\n" % N_VST)
+        fh.write("S %s\n" % " ".join(map(str, state(stops[pairs[0][0]]["p"]["ctx"]))))
+        n = 0
+        for i, j in pairs:
+            r = stops[i]["r"]
+            src = 0 if r["r0"] == BLK_INTERP else 1
+            blk = stops[i]["p"]["bi" if src == 0 else "bp"]
+            cin, cout = stops[i]["p"]["ctx"], stops[j]["p"]["ctx"]
+            off = r["r1"] - RING
+            fh.write("C %d %d %d %d %d %s %s %s %s\n" % (
+                src, r["r3"], r.get("r2", 0x50),
+                struct.unpack_from("<h", cin, 0x7a0)[0],
+                struct.unpack_from("<h", cin, 0x7ba)[0],
+                " ".join(map(str, struct.unpack_from("<68h", blk, 0))),
+                " ".join(map(str, struct.unpack("<80h",
+                                                stops[j]["p"]["ring"][off:off + 160]))),
+                " ".join(map(str, struct.unpack_from("<68h", cout, 0x470))),
+                " ".join(map(str, struct.unpack_from("<3h", cout, 0x7be)))))
             n += 1
-    print("%s: %d frame calls" % (dest, n))
+    print("%s: %d frame-layer calls" % (dest, n))
     return n

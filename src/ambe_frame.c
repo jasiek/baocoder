@@ -34,6 +34,7 @@
 #include "ambe_basop.h"
 #include "ambe_tables.h"
 #include "ambe_frame_int.h"
+#include "ambe_voiced_int.h"
 
 /*
  * Math_SqrtScaled 0x000193E0.
@@ -921,4 +922,287 @@ void ambe_match_excitation_energy(int16_t *amps, int16_t *exp_io,
             *exp_io = 0;
         }
     }
+}
+
+/*
+ * Vocoder_SynthesizeFrame 0x00019DB8.
+ *
+ * The top of the synthesis layer, and the last untranscribed function of the
+ * codec.  One 80-sample half-frame: the decoded parameter block goes in, PCM
+ * comes out, and between them the block is rewritten four times before either
+ * synthesiser sees it.  That rewriting is the whole reason the exact stages
+ * below could not simply be called in order.
+ *
+ *   the envelope, log2 -> linear.  Dsp_HilbertTransform phase-shifts it along
+ *   the harmonic axis into the voiced synthesiser's own state at ctx+0x172,
+ *   which is that state's [0xAD] and not a separate array; then
+ *   Vocoder_NormalizeSpectralBlock turns log2 into linear with a block
+ *   exponent, and Vocoder_MatchExcitationEnergy applies the IMBE enhancement.
+ *   All three run only on a voice frame, and the whole group is skipped when
+ *   bit 0 of ctx+0x7ba is set;
+ *
+ *   the voicing flags.  Both blocks get an array planted on this function's
+ *   stack and filled by Vocoder_ResetFrameBuffer - the current one and the
+ *   previous one, because the voiced synthesiser reads both - and the pointer
+ *   is cleared again before the block is copied away, so it never outlives the
+ *   call.  This transcription passes the arrays rather than the pointer;
+ *
+ *   the low-frequency ramp.  The smoothed pitch is a one-pole track of the
+ *   frame's own, held on a repeat frame, clamped at 0x3333, and its reciprocal
+ *   comes from Math_FloatDivExponent(2^30, 1, ...).  Every harmonic below the
+ *   clamp - k*w0 under about 500 Hz - is multiplied by (k*pitch/smoothed)^2,
+ *   which is the codec's low-frequency rolloff, and the loop simply stops at
+ *   the first harmonic above it;
+ *
+ *   and the high-frequency tilt, which is the surprise.  Walking DOWN from the
+ *   top harmonic while k*w0 stays above 0.6*pi, each amplitude is multiplied by
+ *   (k*w0)/(0.6*pi) - 0x6AAB is 5/6 in Q15 and the doubling makes it 5/3, and
+ *   0x4CCD, where the walk stops, is exactly where that product is one.  So the
+ *   band above 2400 Hz is tilted up, by 1.0 at the corner rising to 1.67 at
+ *   Nyquist.  Each harmonic keeps its own exponent through that, and they are
+ *   flattened back onto the largest of them afterwards.
+ *
+ * Then the three sample-domain stages, all of them already exact, in the order
+ * the stock code runs them: the unvoiced synthesiser into a zeroed
+ * accumulator, the voiced one adding to it, the output filter, and the scaling
+ * to int16 - and last the block is copied into ctx+0x470 to be the next
+ * frame's previous.
+ *
+ * Two things are here and not implemented, both explicit rather than guessed.
+ *
+ * The TONE path, pFrameParams[1] != 0xFF, needs Tone_ClassifyCtcssDcsCode
+ * 0x0002B0F4 and Tone_CtcssDcsCodeToTableIndex, neither of which this project
+ * transcribes; it is the same gap ambe_frame_reset_buffer already has, and the
+ * same justification - the corpus holds two tone frames in 2052 and the decoder
+ * mutes them.  A tone frame reaches synthesis here with its block untouched by
+ * that path, which is not what the radio does.
+ *
+ * And the ramp walks the amplitude array with no bound of its own: what stops
+ * it is the pitch, one harmonic per iteration until k*pitch reaches the clamp.
+ * A pitch small enough to run past the block would have the stock code writing
+ * over its own fields, and a pitch of zero would hang it, neither of which a
+ * caller produces; this stops at the end of the block and says so.
+ *
+ * Four things in here are transcribed and NOT exercised by the 617-call
+ * sequence, and mutating each of them out leaves it green, so they are recorded
+ * as unverified rather than presented as tested: the 0x3333 clamp, because the
+ * smoothed pitch stays under it on every frame of the capture; the previous
+ * block's voicing flags, which the stock code builds for
+ * Vocoder_SynthesizeVoiced's pPrev[0x40] and src/ambe_voiced.c does not read;
+ * the copy into the silence slot, which nothing reads back; and the zero fill
+ * of ctx+0x172 on a non-voice frame, which no frame of the capture reads.
+ */
+
+/* Dsp_FillShortArray 0x00019494, the two-line memset the stock code calls. */
+static void fill_shorts(int16_t *dst, int16_t v, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++)
+        dst[i] = v;
+}
+
+void ambe_frame_state_reset(ambe_frame_state *st)
+{
+    memset(st, 0, sizeof *st);
+}
+
+void ambe_frame_synthesize(int16_t *params, int16_t *pcm, int n, int repeat,
+                           ambe_frame_state *st)
+{
+    uint16_t voi[0x38], prev_voi[0x38];
+    int32_t acc[84];
+    int16_t amp[0x38], aexp[0x38];
+    int16_t L;
+    int i;
+
+    /* the stock code zeroes 2n shorts of an 84-int frame and reads none of the
+       rest; zeroing all of it is the same behaviour and a defined one */
+    memset(acc, 0, sizeof acc);
+    memset(amp, 0, sizeof amp);
+    memset(aexp, 0, sizeof aexp);
+
+    if ((st->bypass & 1) == 0) {
+        if (params[0] == 1)
+            ambe_hilbert_transform(st->voiced + 0xAD, params + 8, params[2]);
+        else
+            fill_shorts(st->voiced + 0xAD, 0, 0x38);
+        ambe_normalize_spectral_block(params + 8, params + 0x42, params[2]);
+        if (params[0] == 1)
+            ambe_match_excitation_energy(params + 8, params + 0x42,
+                                         &st->ref_mant, &st->ref_exp,
+                                         params[6], params[2]);
+        if (params[0] == 2)
+            ambe_frame_params_copy(st->silence, params);
+    }
+
+    /* both blocks get their flags, and the previous one's are rebuilt from the
+       previous block rather than remembered - `st.w r3,(r6,0x4f0)` is
+       pPrev[0x40], planted the same way.  ambe_voiced_synth takes one flag
+       array and not two, so prev_voi goes nowhere; it is built anyway because
+       the stock code builds it, and because a transcription of the voiced
+       synthesiser that grew a second array would want it here. */
+    ambe_frame_reset_buffer(params, voi);
+    ambe_frame_reset_buffer(st->prev, prev_voi);
+    (void)prev_voi;
+
+    if ((int16_t)params[1] != 0xff) {
+        /* the tone path; see the comment above.  It rewrites the block from
+           the tone tables and then joins the synthesis below, which is what
+           happens here minus the rewriting. */
+    } else {
+        int16_t sp, clamp, ed, md, ee, v;
+        uint16_t q;
+        int16_t oe = 0;
+        int32_t val;
+
+        if (repeat == 0) {
+            uint32_t vuv = ((uint32_t)(uint16_t)params[5] << 16)
+                         | (uint32_t)(uint16_t)params[4];
+
+            st->pitch = (int16_t)ambe_smooth_pitch_state(
+                (uint32_t)(int32_t)st->pitch, (uint16_t)params[6], vuv);
+        }
+        sp = st->pitch;
+        if (sp < 0x3334) {
+            clamp = sp;
+            val   = ambe_shl32((int32_t)sp, 16);
+        } else {
+            clamp = 0x3333;
+            val   = 0x33330000;
+        }
+        if (val == 0) {
+            ed = -4;
+            md = 0;
+        } else {
+            int s = ambe_nsh(val);
+
+            ed = (int16_t)(-4 - s);
+            md = (int16_t)((uint32_t)ambe_lsl_hw(val, s) >> 16);
+        }
+        /* 2^30 at exponent 1 over the smoothed pitch: the ramp's reciprocal */
+        q  = ambe_float_div_exp(0x40000000, 1, (int32_t)md, ed, &oe);
+        ee = (int16_t)(oe - 4);
+
+        /* --- the low-frequency ramp, (k*pitch/smoothed)^2 per harmonic --- */
+        v = params[6];
+        if (v < clamp) {
+            int32_t phi = ambe_shl32((int32_t)(int16_t)params[6], 16);
+
+            for (i = 0; i < 68 - 8; i++) {
+                int32_t prod = (int32_t)((uint32_t)((int32_t)v
+                                         * (int32_t)(int16_t)q) * 2u);
+                int32_t sq, vhi, sum;
+                int16_t shift;
+
+                if (prod == 0) {
+                    sq    = 0;
+                    shift = (int16_t)(ee * 2);
+                } else {
+                    int s = ambe_nsh(prod);
+                    int16_t m = (int16_t)((uint32_t)ambe_lsl_hw(prod, s) >> 16);
+
+                    shift = (int16_t)((int16_t)(ee - s) * 2);
+                    sq = (int32_t)((uint32_t)((int32_t)m * (int32_t)m) * 2u);
+                }
+                sq = shift < 0 ? ambe_asr_hw(sq, -shift) : ambe_lsl_hw(sq, shift);
+
+                vhi = ambe_shl32((int32_t)v, 16);
+                sum = (int32_t)((uint32_t)vhi + (uint32_t)phi);
+                params[8 + i] = (int16_t)ambe_asr_hw(
+                    (int32_t)((uint32_t)((int32_t)(int16_t)((uint32_t)sq >> 16)
+                              * (int32_t)params[8 + i]) * 2u), 16);
+                /* the machine's signed-overflow test on the 16-bit step, done
+                   in the high half of a word: a positive one ends the ramp, a
+                   negative one restarts it from -0x8000 */
+                if ((int32_t)(((uint32_t)sum ^ (uint32_t)vhi)
+                              & ((uint32_t)sum ^ (uint32_t)phi)) < 0) {
+                    if (vhi >= 0)
+                        break;
+                    v = (int16_t)0x8000;
+                    continue;
+                }
+                v = (int16_t)((uint32_t)sum >> 16);
+                if (v >= clamp)
+                    break;
+            }
+        }
+
+        /* --- the high-frequency tilt, walking down from the top harmonic --- */
+        L = params[2];
+        if (L > 0) {
+            int cnt = (int)((((uint32_t)(uint16_t)L - 1) & 0xffff) + 1);
+            int16_t be = params[0x42];
+
+            for (i = 0; i < cnt; i++) {
+                amp[i]  = params[8 + i];
+                aexp[i] = be;
+            }
+        }
+        {
+            uint32_t t = (uint32_t)((int32_t)(int16_t)L
+                                    * (int32_t)(int16_t)params[6]) * 2u;
+            int16_t x = (int16_t)((t >> 4) & 0xffff);
+
+            if (x >= 0x4cce) {
+                int16_t be1 = (int16_t)(params[0x42] + 1);
+                int32_t step = ambe_shl32((int32_t)(int16_t)params[6], 13);
+                int k = L - 1;
+
+                do {
+                    /* 0x6AAB is 5/6 in Q15 and the product is doubled, so the
+                       factor is x*5/3 >> 15 - one at x = 0x4CCD exactly */
+                    int16_t g = (int16_t)ambe_asr_hw(
+                        (int32_t)((uint32_t)((int32_t)x * 0x6aab) * 2u), 16);
+                    int32_t prod = (int32_t)((uint32_t)((int32_t)amp[k]
+                                             * (int32_t)g) * 2u);
+                    int s = prod != 0 ? ambe_nsh(prod) : 0;
+                    int32_t xn = (int32_t)((uint32_t)ambe_shl32((int32_t)x, 16)
+                                           - (uint32_t)step);
+
+                    aexp[k] = (int16_t)(be1 - s);
+                    amp[k]  = (int16_t)ambe_asr_hw(ambe_lsl_hw(prod, s), 16);
+                    x = (int16_t)((uint32_t)xn >> 16);
+                    k--;
+                } while (x >= 0x4cce && k >= 0);
+            }
+        }
+
+        /* --- and back onto one exponent, the largest of them --- */
+        {
+            int16_t mx = aexp[0];
+
+            if (L >= 2)
+                for (i = 1; i < L; i++)
+                    if (mx < aexp[i])
+                        mx = aexp[i];
+            if (L >= 1) {
+                int cnt = (int)((((uint32_t)(uint16_t)L - 1) & 0xffff) + 1);
+
+                for (i = 0; i < cnt; i++) {
+                    int16_t sh = (int16_t)(aexp[i] - mx);
+                    int32_t w = (int32_t)((uint32_t)(uint16_t)amp[i] << 16);
+
+                    params[8 + i] = (int16_t)ambe_asr_hw(
+                        sh < 0 ? ambe_asr_hw(w, -sh) : ambe_lsl_hw(w, sh), 16);
+                }
+            }
+            params[0x42] = mx;
+        }
+    }
+
+    /* the three sample-domain stages, in the stock code's order */
+    ambe_unvoiced_synth(acc, n, &st->unvoiced, params[0], params[2], params[6],
+                        params + 8, params[0x42], voi, st->pitch);
+    ambe_voiced_synth(acc, (uint16_t)n, st->voiced, params, st->prev,
+                      (const int16_t *)voi, st->pitch);
+    ambe_postfilter(&st->post, acc, n);
+    ambe_synth_output(pcm, acc, n);
+
+    /* the flag pointer is cleared before the copy, which is why
+       Vocoder_CopyFrameParamsWithReset zeroes [0x40..0x41] rather than copying
+       them: two blocks must never share one array */
+    params[0x40] = 0;
+    params[0x41] = 0;
+    ambe_frame_params_copy(st->prev, params);
 }

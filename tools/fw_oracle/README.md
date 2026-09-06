@@ -183,15 +183,27 @@ and the two synthesisers. `export` has always written that function's block and
 its 80 samples, which is enough to *measure* it and not enough to *replay* it:
 it reads and writes channel state at ctx+0x18, +0x172, +0x470, +0x4f8, +0x648,
 +0x7ba and +0x7be, and a transcription handed only the block reproduces none of
-it. So the capture now peeks the whole 0x800-byte context at every stop and
-`export_frame` carries it on both sides.
+it. So the capture peeks the whole 0x800-byte context at every stop - the whole
+of it rather than those seven fields, because the list came from reading the
+decompilation and an eighth would otherwise be found the hard way.
 
-The whole context rather than those seven fields, deliberately: the list came
-from reading the decompilation, an eighth would be found the hard way, and the
-cost is output-file size in a scratch run. 617 calls, and the fixture is 5.3 MB
-of it - which is why it is not committed yet. Once the transcription exists it
-will say which of those bytes it actually touches, and the fixture can be
-trimmed to them instead of being guessed at now.
+The fixture is not the whole of it. Carrying two copies of the context per call
+was 5.3 MB and could not be trimmed until something knew which bytes mattered;
+measuring the capture answers that, and the answer is that **nothing outside
+this function writes any of them between calls** except the bypass word at
++0x7ba (15 of 616 gaps) and the tail of the voiced-state window. So the fixture
+is a SEQUENCE: the state once, at the first call, then per call the inputs, the
+80 samples, the block left at ctx+0x470 and the three scalars. 543 KB, and a
+transcription that gets any bit of any stage wrong diverges and never recovers.
+
+The voiced-state tail is worth its own line. That window is 0x22C shorts,
+chosen by the capture to reach the next structure the memory map knows about;
+what changes between calls is exactly `[0x1E8..0x227]` and nothing below it ever
+does. So the voiced synthesiser's state proper ends at `0x1E8` - which is where
+reading `Vocoder_SynthesizeHarmonicSpectrum 0x0001D4C8` put it, the harmonic
+spectrum at `[0xE6]` running 0x100 shorts - and the rest of the window belongs
+to something else. It is carried anyway; if the synthesiser ever read it, the
+sequence would say so.
 
 ```sh
 python3 tools/fw_oracle/gen_synth_jobs.py /tmp/sf.job /tmp/dm32_arc4_1.frames 360
@@ -199,6 +211,18 @@ EMU_PROJ=dm32uv-emu-1 $REVENG/tools/emu/run.sh /tmp/sf.job /tmp/sf.out
 python3 -c "import sys; sys.path.insert(0,'tools/fw_oracle'); import gen_synth_jobs as G; \
             G.export_frame('/tmp/sf.out','tests/fixtures/dm32_arc4_1.fwframe')"
 ```
+
+`tests/test_frame.c` consumes it, and mutating the layer says what the sequence
+reaches. Moving the high-frequency tilt's corner, its 5/3 factor or its step
+leaves **0 of 617**; flattening the block onto the smallest per-harmonic
+exponent instead of the largest leaves 1; halving the ramp's reciprocal 227;
+writing the Hilbert transform one short off in the channel state 192. Four
+things it does not reach, and they are recorded as untested rather than
+presented otherwise: the 0x3333 clamp on the smoothed pitch, which no frame of
+this capture exceeds; the previous block's voicing flags, which the stock code
+builds for `Vocoder_SynthesizeVoiced`'s `pPrev[0x40]` and `src/ambe_voiced.c`
+does not read; the copy into the silence slot at ctx+0x4f8, which nothing reads
+back; and the zero fill of ctx+0x172 on a non-voice frame.
 
 ## The voiced synthesiser
 

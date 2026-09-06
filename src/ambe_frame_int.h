@@ -12,6 +12,8 @@
 
 #include <stdint.h>
 
+#include "ambe.h"
+
 /* FUN_0001ABDC: twice the dot product of two int16 arrays, renormalised, as a
    32-bit mantissa with the shift that produced it. */
 int32_t ambe_dot_norm(int16_t *exp_out, const int16_t *a, const int16_t *b,
@@ -70,5 +72,54 @@ void ambe_frame_params_copy(int16_t *dst, const int16_t *src);
 /* Vocoder_ResetFrameBuffer 0x00019D38.  `flags` is the 0x38-short array the
    block's [0x40] points at in the running firmware. */
 void ambe_frame_reset_buffer(int16_t *params, uint16_t *flags);
+
+/*
+ * The channel state Vocoder_SynthesizeFrame 0x00019DB8 carries, laid out as
+ * the firmware's pChannelState rather than as this library would design it,
+ * because the offsets are what the decompilation cites:
+ *
+ *   +0x000  the output filter's six words
+ *   +0x018  the voiced synthesiser's state, 0x22C shorts, running to +0x470
+ *           exactly.  [0xAD] of it is ctx+0x172, the log2 envelope the frame
+ *           layer writes with the Hilbert transform and the voiced synthesiser
+ *           reads
+ *   +0x470  the previous frame's parameter block, 68 shorts
+ *   +0x4f8  the block the last silence frame was copied into, 68 shorts.
+ *           Nothing in this layer reads it back
+ *   +0x648  the unvoiced synthesiser's state
+ *   +0x7a0  which of the two tone paths the classifier takes
+ *   +0x7ba  bit 0 skips the whole preprocessing block
+ *   +0x7be  the smoothed pitch, the one number both synthesisers are handed
+ *   +0x7c0  the excitation match's reference energy, mantissa and exponent
+ *
+ * The per-harmonic voicing flags are NOT in here: the firmware keeps them on
+ * Vocoder_SynthesizeFrame's own stack and plants a pointer to them in the
+ * parameter block, so they live and die within one call.
+ */
+#define AMBE_VOICED_STATE 0x22C
+
+typedef struct {
+    ambe_postfilter_state post;
+    int16_t             voiced[AMBE_VOICED_STATE];
+    int16_t             prev[68];
+    int16_t             silence[68];
+    ambe_unvoiced_state unvoiced;
+    int16_t             tone_mode;
+    int16_t             bypass;
+    int16_t             pitch;
+    int16_t             ref_mant;
+    int16_t             ref_exp;
+} ambe_frame_state;
+
+void ambe_frame_state_reset(ambe_frame_state *st);
+
+/*
+ * Vocoder_SynthesizeFrame 0x00019DB8: one 80-sample half-frame, from the
+ * decoded parameter block to PCM.  `params` is the 68-short block and is
+ * rewritten in place; `pcm` receives `n` samples; `repeat` is the firmware's
+ * bRepeatFrame, which holds the pitch smoother.
+ */
+void ambe_frame_synthesize(int16_t *params, int16_t *pcm, int n, int repeat,
+                           ambe_frame_state *st);
 
 #endif /* AMBE_FRAME_INT_H */

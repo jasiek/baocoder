@@ -17,6 +17,7 @@
  *   Dsp_NormalizeArray        0x0001ADA0   here
  *   Math_ArrayShiftSaturate   0x0001AF5C   here
  *   Vocoder_MatchExcitationEnergy 0x000277F8  here
+ *   Vocoder_SynthesizeFrame   0x00019DB8   here, as a sequence
  *
  * SPDX-License-Identifier: ISC
  */
@@ -564,6 +565,123 @@ int main(void)
         printf("[Vocoder_MatchExcitationEnergy %d/%d bit-exact, amplitudes, "
                "block exponent and reference pair, %d silent and %d "
                "constructed for the R1 saturation] ", mok, mn, silent, built);
+    }
+
+    {   /* Vocoder_SynthesizeFrame, the whole layer, as a SEQUENCE.
+
+           Nothing here can be checked one call at a time: every number the
+           function produces depends on channel state it also writes.  So the
+           fixture hands over the state once, at the first call, and then only
+           the inputs; this runs the 617 calls in order carrying its own state
+           and compares the samples, the block the call left at ctx+0x470 and
+           the three scalars it maintains.  A wrong bit anywhere - in this
+           layer or in any of the seven exact functions under it - diverges and
+           never recovers, which is what makes 49 360 consecutive samples a
+           stronger statement than any single call could be. */
+        FILE *g = fixture_open("dm32_arc4_1.fwframe");
+        static ambe_frame_state fs;
+        static int16_t blk[68], ref_pcm[80], ref_prev[68], pcm[80];
+        int fn = 0, fok = 0, sok = 0, bok = 0, xok = 0, voice = 0, silence = 0;
+        int primed = 0;
+
+        ambe_frame_state_reset(&fs);
+        while (getline(&line, &cap, g) > 0) {
+            char *p = line;
+            int k, bad;
+
+            if (line[0] == '#')
+                continue;
+            if (line[0] == 'S') {
+                p++;
+                for (k = 0; k < 6; k++)
+                    fs.post.s[k] = (int32_t)strtol(p, &p, 10);
+                for (k = 0; k < AMBE_VOICED_STATE; k++)
+                    fs.voiced[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 68; k++)
+                    fs.prev[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 68; k++)
+                    fs.silence[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < AMBE_UNVOICED_STATE; k++)
+                    fs.unvoiced.s[k] = (int16_t)strtol(p, &p, 10);
+                fs.pitch    = (int16_t)strtol(p, &p, 10);
+                fs.ref_mant = (int16_t)strtol(p, &p, 10);
+                fs.ref_exp  = (int16_t)strtol(p, &p, 10);
+                primed = 1;
+                continue;
+            }
+            if (line[0] != 'C')
+                continue;
+            CHECK(primed, "a call before the state line\n");
+            p++;
+            (void)strtol(p, &p, 10);                    /* src */
+            {
+                long repeat = strtol(p, &p, 10);
+                long ns     = strtol(p, &p, 10);
+
+                fs.tone_mode = (int16_t)strtol(p, &p, 10);
+                fs.bypass    = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 68; k++)      blk[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 80; k++)  ref_pcm[k] = (int16_t)strtol(p, &p, 10);
+                for (k = 0; k < 68; k++) ref_prev[k] = (int16_t)strtol(p, &p, 10);
+                {
+                    int16_t rp = (int16_t)strtol(p, &p, 10);
+                    int16_t rm = (int16_t)strtol(p, &p, 10);
+                    int16_t re = (int16_t)strtol(p, &p, 10);
+
+                    if (blk[0] == 1) voice++;
+                    if (blk[0] == 2) silence++;
+                    ambe_frame_synthesize(blk, pcm, (int)ns, (int)repeat, &fs);
+
+                    for (bad = 0, k = 0; k < 80; k++)
+                        if (pcm[k] != ref_pcm[k]) {
+                            if (fn - sok < 3)
+                                CHECK(0, "frame call %d sample %d: %d, firmware "
+                                         "%d\n", fn, k, (int)pcm[k],
+                                      (int)ref_pcm[k]);
+                            bad = 1;
+                            break;
+                        }
+                    if (!bad) sok++;
+                    for (bad = 0, k = 0; k < 68; k++)
+                        if (fs.prev[k] != ref_prev[k]) {
+                            if (fn - bok < 3)
+                                CHECK(0, "frame call %d block[%d] left behind: "
+                                         "%d, firmware %d\n", fn, k,
+                                      (int)fs.prev[k], (int)ref_prev[k]);
+                            bad = 1;
+                            break;
+                        }
+                    if (!bad) bok++;
+                    if (fs.pitch == rp && fs.ref_mant == rm && fs.ref_exp == re)
+                        xok++;
+                    else if (fn - xok < 3)
+                        CHECK(0, "frame call %d state: pitch %d ref %d@%d, "
+                                 "firmware %d %d@%d\n", fn, (int)fs.pitch,
+                              (int)fs.ref_mant, (int)fs.ref_exp,
+                              (int)rp, (int)rm, (int)re);
+                    fn++;
+                }
+            }
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        fok = sok < bok ? sok : bok;
+        if (xok < fok) fok = xok;
+        CHECK(fn > 600, "only %d frame-layer calls\n", fn);
+        CHECK(voice > 100 && silence > 10,
+              "%d voice and %d silence frames: the two classes take different "
+              "paths through the preprocessing\n", voice, silence);
+        CHECK(sok == fn, "Vocoder_SynthesizeFrame samples exact on %d of %d\n",
+              sok, fn);
+        CHECK(bok == fn, "Vocoder_SynthesizeFrame block exact on %d of %d\n",
+              bok, fn);
+        CHECK(xok == fn, "Vocoder_SynthesizeFrame state exact on %d of %d\n",
+              xok, fn);
+        printf("[Vocoder_SynthesizeFrame %d/%d calls carrying its own state, "
+               "%d samples, block and state; %d voice %d silence] ",
+               fok, fn, fn * 80, voice, silence);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);
