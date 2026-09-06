@@ -169,6 +169,13 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
                             int exp_b, int16_t *exp_out);
 
 /*
+ * Math_Pow2Scaled 0x00019280: ambe_pow2's chain entered with a (mantissa,
+ * exponent) pair and leaving a plain integer in the caller's Q format.  A second
+ * copy of the polynomial in the stock code, not a wrapper.
+ */
+uint32_t ambe_pow2_scaled(int32_t mant, int16_t exp, int16_t q);
+
+/*
  * Math_FloatSub 0x00018E5C: the add with `subu`, returning B - A rather than
  * A - B, and with zero cases that are not the add's mirrored - a zero B returns
  * a negated A, and a mantissa of 0x8000 saturates to 0x7FFF there.

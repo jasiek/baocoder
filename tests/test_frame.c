@@ -9,10 +9,12 @@
  *
  *   Math_PopCountBits         0x000189F4   here
  *   Vocoder_SmoothPitchState  0x00022D7C   here
+ *   Math_Pow2Scaled           0x00019280   here
  *
  * SPDX-License-Identifier: ISC
  */
 #include "ambe.h"
+#include "ambe_basop.h"
 #include "ambe_frame_int.h"
 #include "testutil.h"
 
@@ -89,6 +91,39 @@ int main(void)
         CHECK(sok == sn, "Vocoder_SmoothPitchState exact on %d of %d\n", sok, sn);
         printf("[Vocoder_SmoothPitchState %d/%d bit-exact, %d smoothed and %d "
                "held at the eight-band gate] ", sok, sn, ran, held);
+    }
+
+    {   /* Math_Pow2Scaled - ambe_pow2's chain with a Q-format tail, and a
+           second copy of the polynomial in the stock code rather than a
+           wrapper, so it is swept on its own */
+        FILE *g = fixture_open("frame_pow2scaled.fw");
+        int pn = 0, pok = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            long m, e, q;
+            unsigned long r;
+            char *p = line;
+            uint32_t got;
+
+            if (line[0] == '#')
+                continue;
+            m = strtol(p, &p, 10); e = strtol(p, &p, 10);
+            q = strtol(p, &p, 10); r = strtoul(p, &p, 10);
+            got = ambe_pow2_scaled((int32_t)m, (int16_t)e, (int16_t)q);
+            pn++;
+            if (got == (uint32_t)r)
+                pok++;
+            else
+                CHECK(0, "pow2_scaled(%ld,%ld,%ld) = %u, firmware %lu\n",
+                      m, e, q, (unsigned)got, r);
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(pn > 600, "only %d scaled powers\n", pn);
+        CHECK(pok == pn, "Math_Pow2Scaled exact on %d of %d\n", pok, pn);
+        printf("[Math_Pow2Scaled %d/%d bit-exact] ", pok, pn);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

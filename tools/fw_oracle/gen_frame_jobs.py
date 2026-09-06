@@ -22,6 +22,7 @@ import emu
 
 POPCOUNT = 0x000189F4
 SMOOTH   = 0x00022D7C
+POW2SC   = 0x00019280
 
 
 def _popcount_cases():
@@ -71,6 +72,28 @@ def _smooth_cases():
     return out
 
 
+def _pow2_scaled_cases():
+    """(mantissa, exponent, qFormat).
+
+    The mantissa is shifted by exp-15 before the fraction is taken, and the
+    integer part comes off the same word with a LOGICAL shift, so the cases have
+    to include mantissas that shift up into the sign bit as well as ones that
+    shift away to nothing.
+    """
+    out = [(0, 0, 0), (1, 0, 0), (0x7FFF, 15, 15), (-0x8000, 15, 15),
+           (0x4000, 16, 0), (0x4000, 14, 0), (1, 31, 0), (1, -31, 0),
+           (0x7FFF, 0, 0), (0x7FFF, 31, 31), (-1, 15, 0)]
+    x = 606060
+    for _ in range(700):
+        v = []
+        for _ in range(3):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(x)
+        out.append((((v[0] >> 7) & 0xFFFF) - 0x8000, (v[1] % 41) - 12,
+                    (v[2] % 41) - 12))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -78,6 +101,9 @@ def gen(jobfile):
         j.getreg("r0")
     for st, tg, w in _smooth_cases():
         j.call(SMOOTH, st & 0xFFFFFFFF, tg & 0xFFFFFFFF, w & 0xFFFFFFFF)
+        j.getreg("r0")
+    for m, e, q in _pow2_scaled_cases():
+        j.call(POW2SC, m & 0xFFFFFFFF, e & 0xFFFFFFFF, q & 0xFFFFFFFF)
         j.getreg("r0")
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
@@ -108,6 +134,18 @@ def export(outfile, destdir):
         m = 0
         for st, tg, w in _smooth_cases():
             fh.write("%u %u %u %u\n" % (st, tg, w, r0[k]))
+            k += 1
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_pow2scaled.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Math_Pow2Scaled 0x00019280, executed under the p-code emulator.\n"
+                 "# tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: mantissa exponent qFormat, then the value returned.\n")
+        m = 0
+        for mm, e, q in _pow2_scaled_cases():
+            fh.write("%d %d %d %u\n" % (mm, e, q, r0[k]))
             k += 1
             m += 1
     print("%s: %d cases" % (dest, m))

@@ -406,6 +406,44 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
 }
 
 /*
+ * Math_Pow2Scaled 0x00019280.
+ *
+ * The same five-stage Horner and the same six coefficients as ambe_pow2 above,
+ * entered with a (mantissa, exponent) pair instead of a Q16 log and leaving a
+ * plain integer in a caller-chosen Q format instead of a pair.  Not a wrapper
+ * around Math_Pow2 in the stock code either - it is a second copy of the chain,
+ * with the scaling folded onto the end.
+ *
+ * The fraction is bits [15:1] of the shifted mantissa, the same `zext
+ * r12,r1,0xf,0x1` extract Math_Pow2 uses, and the integer part is taken from
+ * the same word with a LOGICAL shift, so a mantissa that has been shifted up
+ * into the sign bit contributes an integer part rather than a negative one.
+ */
+uint32_t ambe_pow2_scaled(int32_t mant, int16_t exp, int16_t q)
+{
+    int sh = (int16_t)(exp - 0xf);
+    int32_t v = ambe_shl32(mant, 16);
+    int32_t u, a, e;
+
+    v = sh < 0 ? ambe_asr_hw(v, -sh) : ambe_lsl_hw(v, sh);
+    u = (int32_t)(((uint32_t)v >> 1) & 0x7fff);
+
+    a = ambe_shl32(mult_r(u, ambe_pow2_coeff_q15[0]), 13);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[1], 16) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 13);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[2], 15) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 14);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[3], 15) + a) >> 16);
+    a = ambe_shl32(mult_r(u, a), 15);
+    a = s16((ambe_shl32(ambe_pow2_coeff_q15[4], 16) + a) >> 16);
+    a = ambe_shl32(mult_r(a, u), 15) + ambe_shl32(ambe_pow2_coeff_q15[5], 16);
+
+    e = (int16_t)((int32_t)((uint32_t)v >> 16) - q + 1);
+    return (uint32_t)((e < 0 ? ambe_asr_hw(a, -e) : ambe_lsl_hw(a, e)) + 0x8000)
+           >> 16;
+}
+
+/*
  * Math_FloatSub 0x00018E5C.  Math_FloatAdd with `subu` where the add has `addu`
  * - and the operands the other way round: it returns B - A, not A - B.
  *
