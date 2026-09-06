@@ -15,6 +15,10 @@
 /* Math_PopCountBits 0x000189F4: the population count of the low `n` bits. */
 int ambe_popcount_bits(uint32_t x, int n);
 
+/* Vocoder_SmoothPitchState 0x00022D7C: a one-pole smoother applied only when
+   more than seven bands are voiced. */
+uint32_t ambe_smooth_pitch_state(uint32_t state, uint16_t target, uint32_t vuv);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

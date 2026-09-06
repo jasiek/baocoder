@@ -15,6 +15,7 @@
  *   Math_SqrtScaled                    0x000193E0   here
  *   Vocoder_CopyFrameParamsWithReset   0x00019CBC   here
  *   Vocoder_ResetFrameBuffer           0x00019D38   here
+ *   Vocoder_SmoothPitchState           0x00022D7C   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -164,4 +165,27 @@ int ambe_popcount_bits(uint32_t x, int n)
         v >>= 1;
     }
     return c;
+}
+
+/*
+ * Vocoder_SmoothPitchState 0x00022D7C.
+ *
+ * A one-pole smoother on the pitch state, applied only when the frame is voiced
+ * enough to trust: `Math_PopCountBits(vuv & 0x55555555, 32) > 7`, which counts
+ * the voiced bands using the same crumb mask everything else in the codec uses,
+ * and leaves the state untouched below eight of them.
+ *
+ * The coefficients read as 0xCCCC and 0xE666 in the decompilation and are
+ * neither: the machine holds 0x6666 and 0x7333 and doubles each product, which
+ * is the Q15 multiply, so the weights are 0.8 and 0.9 rather than something
+ * with a sign bit in it.  0.8 arrives >> 3, giving 0.1 of the new pitch against
+ * 0.9 of the old.
+ */
+uint32_t ambe_smooth_pitch_state(uint32_t state, uint16_t target, uint32_t vuv)
+{
+    if (ambe_popcount_bits(vuv & 0x55555555u, 0x20) <= 7)
+        return state & 0xFFFF;
+
+    return (uint32_t)(ambe_asr_hw((int32_t)(int16_t)target * 0x6666 * 2, 3)
+                      + (int32_t)(int16_t)state * 0x7333 * 2) >> 16;
 }

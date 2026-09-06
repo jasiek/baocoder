@@ -7,7 +7,8 @@
  * decoder produces.  This grows a function at a time, leaves first, each swept
  * before the one above it is written.
  *
- *   Math_PopCountBits 0x000189F4   here
+ *   Math_PopCountBits         0x000189F4   here
+ *   Vocoder_SmoothPitchState  0x00022D7C   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -49,6 +50,46 @@ int main(void)
     line = NULL;
     cap = 0;
     fclose(f);
+
+    {   /* Vocoder_SmoothPitchState, whose gate is a count of voiced bands -
+           so the cases have to straddle eight of them, or the sweep cannot
+           tell the smoother from the identity */
+        FILE *g = fixture_open("frame_smooth.fw");
+        int sn = 0, sok = 0, ran = 0, held = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            unsigned long st, tg, w, r;
+            char *p = line;
+            uint32_t got;
+
+            if (line[0] == '#')
+                continue;
+            st = strtoul(p, &p, 10); tg = strtoul(p, &p, 10);
+            w  = strtoul(p, &p, 10); r  = strtoul(p, &p, 10);
+
+            got = ambe_smooth_pitch_state((uint32_t)st, (uint16_t)tg, (uint32_t)w);
+            sn++;
+            if (got == (uint32_t)r)
+                sok++;
+            else
+                CHECK(0, "smooth(%#lx, %#lx, %#lx) = %u, firmware %lu\n",
+                      st, tg, w, (unsigned)got, r);
+            if (r == (st & 0xFFFF))
+                held++;
+            else
+                ran++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(sn > 600, "only %d smoother cases\n", sn);
+        CHECK(ran > 0 && held > 0, "the fixture is one-sided: %d smoothed, %d "
+              "held - the eight-band gate is not being crossed\n", ran, held);
+        CHECK(sok == sn, "Vocoder_SmoothPitchState exact on %d of %d\n", sok, sn);
+        printf("[Vocoder_SmoothPitchState %d/%d bit-exact, %d smoothed and %d "
+               "held at the eight-band gate] ", sok, sn, ran, held);
+    }
 
     CHECK(n > 400, "only %d popcount cases\n", n);
     CHECK(partial > 0, "no case has bits above the count, so the fixture cannot "

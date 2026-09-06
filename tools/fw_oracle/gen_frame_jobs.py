@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(REVENG, "tools", "emu"))
 import emu
 
 POPCOUNT = 0x000189F4
+SMOOTH   = 0x00022D7C
 
 
 def _popcount_cases():
@@ -44,13 +45,43 @@ def _popcount_cases():
     return out
 
 
+def _smooth_cases():
+    """(state, target, vuv).
+
+    The voicing word decides whether the smoother runs at all - more than seven
+    of the sixteen crumbs voiced - so the cases straddle that: words with 0, 7,
+    8 and 16 bands set, and random ones either side.  Without the boundary the
+    sweep cannot tell the smoother from the identity.
+    """
+    out = []
+    words = [0, 0x55555555, 0x5555, 0x15555555, 0x05555555, 0x01555555,
+             0xFFFFFFFF, 0xAAAAAAAA, 0x40000001, 0x55550000]
+    for w in words:
+        for st in (0, 1, 0x1079, 0x4027, 0x7FFF, 0x8000, 0xFFFF):
+            for tg in (0, 1, 0x1079, 0x7FFF, 0x8000, 0xFFFF):
+                out.append((st, tg, w))
+    x = 31337
+    for _ in range(300):
+        v = []
+        for _ in range(3):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(x)
+        out.append(((v[0] >> 7) & 0xFFFF, (v[1] >> 7) & 0xFFFF,
+                    ((v[2] << 1) & 0xFFFFFFFF)))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
         j.call(POPCOUNT, v & 0xFFFFFFFF, n)
         j.getreg("r0")
+    for st, tg, w in _smooth_cases():
+        j.call(SMOOTH, st & 0xFFFFFFFF, tg & 0xFFFFFFFF, w & 0xFFFFFFFF)
+        j.getreg("r0")
     j.write(jobfile)
-    print("wrote %s: %d popcount cases" % (jobfile, len(_popcount_cases())))
+    print("wrote %s: %d popcount, %d smoother cases"
+          % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
 
 
 def export(outfile, destdir):
@@ -68,6 +99,18 @@ def export(outfile, destdir):
             fh.write("%u %d %d\n" % (v, n, r0[k]))
             k += 1
     print("%s: %d cases" % (dest, k))
+
+    dest = os.path.join(destdir, "frame_smooth.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_SmoothPitchState 0x00022D7C, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: state target voicingWord, then the state returned.\n")
+        m = 0
+        for st, tg, w in _smooth_cases():
+            fh.write("%u %u %u %u\n" % (st, tg, w, r0[k]))
+            k += 1
+            m += 1
+    print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
 
 
