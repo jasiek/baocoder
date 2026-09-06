@@ -29,6 +29,10 @@ void ambe_normalize_spectral_block(int16_t *coeffs, int16_t *exp_out, int count)
    follow from it.  `flags` is what params[0x40] points at. */
 void ambe_update_pitch_history(int16_t *params, uint16_t *flags, int16_t cand);
 
+/* Dsp_HilbertTransform 0x00029D1C: a ten-tap antisymmetric FIR along the
+   harmonic axis.  `dst` is 0x38 shorts; the tail past `count` is zeroed. */
+void ambe_hilbert_transform(int16_t *dst, const int16_t *src, int count);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

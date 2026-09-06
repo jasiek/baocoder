@@ -18,6 +18,7 @@
  *   Vocoder_SmoothPitchState           0x00022D7C   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   here
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   here
+ *   Dsp_HilbertTransform               0x00029D1C   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -315,4 +316,96 @@ void ambe_update_pitch_history(int16_t *params, uint16_t *flags, int16_t cand)
     if (L > 0x38)
         L = 0x38;
     params[2] = L;
+}
+
+/*
+ * Dsp_HilbertTransform 0x00029D1C.
+ *
+ * Named Vocoder_ApplySynthesisWindow in an earlier pass of the
+ * reverse-engineering and it is not a window: it is a ten-tap antisymmetric FIR
+ * whose taps are 18411/(2k+1) for k = 0..9 - the odd-harmonic series, which is
+ * the textbook ideal Hilbert transformer h[m] = 2/(pi*m) for odd m.  It runs
+ * along the HARMONIC axis, not along time, so it phase-shifts a per-harmonic
+ * array.  README, "The synthesis window is not a firmware object", has the
+ * consequence: the radio has no overlap-add window at all.
+ *
+ * The ten taps are written out rather than generated, and that is a correction
+ * rather than a preference.  Generating them as 18411/(2k+1) in C gives 2045 and
+ * 1673 where the image holds 2046 and 1674: the series is ROUNDED, not
+ * truncated, and integer division truncates.  The plate comment in the
+ * reverse-engineering database lists the values and I generated them anyway; the
+ * sweep caught it on the first case.  The derivation stays in the comment
+ * because it is what identifies the filter, but the constants are the ones the
+ * radio holds.
+ *
+ * The interesting part is the extension, because the filter reaches 19 places
+ * either side of every output and the array is only `count` long:
+ *
+ *   left, a reflection about index -1 - W[-2-k] = src[k], with W[-1] itself
+ *   pinned to zero, which is what makes the transform antisymmetric at the
+ *   bottom end rather than merely truncated;
+ *
+ *   right, a RAMP: from src[count-1] the value falls by 1477 per step,
+ *   saturating, out to index 0x40.  Not a reflection - the harmonic envelope is
+ *   decaying there and a reflection would turn the decay back upwards;
+ *
+ *   and right again by reflection past 0x40, but only when count > 0x2D, which
+ *   is exactly when an output at count-1 can reach past 0x40.
+ */
+void ambe_hilbert_transform(int16_t *dst, const int16_t *src, int count)
+{
+    static const int OFF = 24;                 /* room for the left reflection */
+    int16_t w[OFF + 0x4c];
+    int32_t v;
+    int i, k;
+
+    for (i = 0; i < (int)(sizeof(w) / sizeof(w[0])); i++)
+        w[i] = 0;
+    for (i = 0; i < count; i++)
+        w[OFF + i] = src[i];
+    w[OFF - 1] = 0;                            /* `st.h r3,(r6,0x26)` at entry */
+
+    /* right: the falling ramp, saturating, out to 0x3F.  Not 0x40: the loop
+       counter starts at count+1 and increments before the store rather than
+       after it, so the last index written is one below where reading the
+       decompiler's `while (sVar3 < 0x41)` suggests. */
+    v = (int32_t)((uint32_t)(uint16_t)src[count - 1] << 16);
+    for (i = count; i <= 0x3f; i++) {
+        int32_t n = (int32_t)((uint32_t)v + 0xfa3b0000u);
+
+        /* the machine's overflow test, and it has to be done on SIGNED values:
+           0xfa3affff is an unsigned constant in C, so `(n ^ 0xfa3affff) < 0`
+           promotes the whole expression to unsigned and can never be true - the
+           saturation then never fires and a full-scale input runs off the end */
+        if ((int32_t)(((uint32_t)n ^ (uint32_t)v)
+                      & ((uint32_t)n ^ 0xfa3affffu)) < 0)
+            n = v < 0 ? (int32_t)0x80000000 : 0x7fffffff;
+        w[OFF + i] = (int16_t)((uint32_t)n >> 16);
+        v = n;
+    }
+    /* right past 0x40, by reflection, only when an output can reach there */
+    if (count > 0x2d)
+        for (i = 0; i <= 0x4a - 0x40; i++)
+            w[OFF + 0x40 + i] = w[OFF + 0x3e - i];
+    /* left: the reflection about -1 */
+    for (k = 0; k <= 18; k++)
+        w[OFF - 2 - k] = w[OFF + k];
+
+    for (i = 0; i < count; i++) {
+        int32_t acc = 0;
+
+        for (k = 0; k < 10; k++) {
+            /* 18411/(2k+1) rounded: SRAM 0x18003958, file 0x067018 */
+            static const int16_t tapv[10] = {
+                18411, 6137, 3682, 2630, 2046, 1674, 1416, 1227, 1083, 969
+            };
+            int32_t tap = tapv[k];
+
+            acc += (int32_t)(int16_t)w[OFF + i + 1 + 2 * k] * tap * 2
+                 - (int32_t)(int16_t)w[OFF + i - 1 - 2 * k] * tap * 2;
+        }
+        dst[i] = (int16_t)((((uint32_t)acc & 0x80000000u)
+                            + (((uint32_t)acc * 2) & 0x7fffffffu)) >> 16);
+    }
+    memset(dst + count, 0, (size_t)(int16_t)(0x38 - count) * sizeof(int16_t));
 }

@@ -12,6 +12,7 @@
  *   Math_Pow2Scaled           0x00019280   here
  *   Vocoder_NormalizeSpectralBlock 0x00022C18   here
  *   Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8 here
+ *   Dsp_HilbertTransform      0x00029D1C   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -247,6 +248,52 @@ int main(void)
               hok, hn);
         printf("[Vocoder_UpdatePitchHistoryBuffer %d/%d bit-exact, %d moving the "
                "candidate] ", hok, hn, moved);
+    }
+
+    {   /* Dsp_HilbertTransform, whose answer is mostly decided by the two
+           extensions it builds either side of the input */
+        FILE *g = fixture_open("frame_hilbert.fw");
+        int tn = 0, tok = 0, longblk = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t src[56], ref[56], got[56];
+            long count;
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) src[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 56; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+
+            for (k = 0; k < 56; k++)
+                got[k] = (int16_t)0xEEEE;
+            ambe_hilbert_transform(got, src, (int)count);
+            for (k = 0; k < 56; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "hilbert case %d (count %ld) slot %d: %d, "
+                             "firmware %d\n", tn, count, k, (int)got[k],
+                          (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                tok++;
+            if (count > 0x2d)
+                longblk++;
+            tn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(tn > 300, "only %d Hilbert cases\n", tn);
+        CHECK(longblk > 0, "no case has count > 0x2D, which is the only way to "
+                           "reach the reflection past index 0x40\n");
+        CHECK(tok == tn, "Dsp_HilbertTransform exact on %d of %d\n", tok, tn);
+        printf("[Dsp_HilbertTransform %d/%d bit-exact, %d long enough to reach "
+               "past 0x40] ", tok, tn, longblk);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

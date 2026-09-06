@@ -25,6 +25,9 @@ SMOOTH   = 0x00022D7C
 POW2SC   = 0x00019280
 NORMBLK  = 0x00022C18
 PITCHHIST = 0x0001A9E8
+HILBERT  = 0x00029D1C
+HSRC     = 0x00051600
+HDST     = 0x00051700
 PARAMS   = 0x00051200
 FLAGS    = 0x00051400
 BLK      = 0x00051000
@@ -173,6 +176,41 @@ def _pitchhist_cases():
     return out
 
 
+def _hilbert_cases():
+    """(count, 0x38 source values).
+
+    The filter reaches 19 places either side of every output, so what the cases
+    have to vary is the count - short blocks lean almost entirely on the
+    extensions, and only count > 0x2D reaches the reflection past 0x40 - and the
+    last value, which is where the falling ramp starts and where saturation is
+    reachable.
+    """
+    out = []
+    x = 5150
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    for count in (1, 2, 9, 0x2c, 0x2d, 0x2e, 0x37, 0x38):
+        out.append((count, [0] * 0x38))
+        out.append((count, [0x7FFF] * 0x38))
+        out.append((count, [-0x8000] * 0x38))
+        out.append((count, [(i * 601) % 0xFFFF - 0x8000 for i in range(0x38)]))
+        out.append((count, [0x4000 - i * 0x200 for i in range(0x38)]))
+        # a last value near the ends, where the ramp saturates almost at once
+        v = [100] * 0x38
+        v[count - 1] = -0x7FFF
+        out.append((count, list(v)))
+        v[count - 1] = 0x7FFF
+        out.append((count, list(v)))
+    for _ in range(300):
+        out.append((1 + rnd(0x38),
+                    [rnd(0x10000) - 0x8000 for _ in range(0x38)]))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -200,6 +238,11 @@ def gen(jobfile):
         j.call(PITCHHIST, PARAMS, cand & 0xFFFFFFFF)
         j.peek("ph%d" % i, PARAMS, 68 * 2)
         j.peek("pf%d" % i, FLAGS, 56 * 2)
+    for i, (count, vals) in enumerate(_hilbert_cases()):
+        j.poke(HSRC, struct.pack("<56h", *vals))
+        j.poke(HDST, b"\xEE" * (56 * 2))
+        j.call(HILBERT, HDST, HSRC, count & 0xFFFFFFFF)
+        j.peek("hb%d" % i, HDST, 56 * 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -275,6 +318,19 @@ def export(outfile, destdir):
             fh.write("%d %s %s %s %s\n" % (
                 cand, " ".join(map(str, b)), " ".join(map(str, fl)),
                 " ".join(map(str, o)), " ".join(map(str, f))))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_hilbert.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Dsp_HilbertTransform 0x00029D1C, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count, 56 source values, then the 56 it wrote.\n")
+        m = 0
+        for i, (count, vals) in enumerate(_hilbert_cases()):
+            o = struct.unpack("<56h", res["peek"]["hb%d" % i][0])
+            fh.write("%d %s %s\n" % (count, " ".join(map(str, vals)),
+                                      " ".join(map(str, o))))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
