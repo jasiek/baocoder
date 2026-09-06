@@ -233,6 +233,16 @@ MATH_TABLES = [
 # DCS categories Tone_ClassifyCtcssDcsCode separates - two harmonic bins each,
 # and the function returns the entry minus one.  Not Q anything: these are
 # harmonic indices, 4..23, and the two per code are the tone pair.
+# Vocoder_DetectFrameErasure 0x0001A4C8 reads this through the literal at
+# 0x0001A5B8, whose value is 0x18001170.  Two 17-byte patterns of tone codes
+# 0x14..0x16 - one per slot, at +0 and +0x14 - which the function matches the
+# last seventeen pitch codes against, and then four bytes at +0x28 which it
+# assembles into a 32-bit word, XORs with 0x3C670CE3 and walks one bit per
+# frame.  The three padding bytes after each pattern are included because this
+# is a copy of the image and not a summary of it.
+ERASURE_SRAM = 0x18001170
+ERASURE_N = 0x2c
+
 DCS_SRAM = 0x1800331c
 DCS_N = 36 * 2
 
@@ -245,6 +255,18 @@ VUV_N = 128
 def s16(raw, off):
     v = raw[off] | (raw[off + 1] << 8)
     return v - 65536 if v >= 32768 else v
+
+
+def emit_u8(name, vals, per_line, comment):
+    """Bytes, not shorts.  Vocoder_DetectFrameErasure's patterns are compared
+    a byte at a time against a short array, so widening them here would be a
+    re-encoding rather than a copy."""
+    print("/* %s */" % comment)
+    print("const unsigned char %s[%d] = {" % (name, len(vals)))
+    for i in range(0, len(vals), per_line):
+        print("    " + " ".join("0x%02x," % v for v in vals[i:i + per_line]))
+    print("};")
+    print()
 
 
 def emit(name, vals, per_line, comment):
@@ -293,6 +315,14 @@ def main():
         emit(name, vals, per_line,
              "SRAM 0x%08X, file 0x%06X, %d x int16 Q15 - %s"
              % (sram, off, count, owner))
+
+    off = ERASURE_SRAM - 0x18000000 + BASE
+    emit_u8("ambe_erasure_pattern", list(raw[off:off + ERASURE_N]), 8,
+            "SRAM 0x%08X, file 0x%06X, %d bytes - Vocoder_DetectFrameErasure "
+            "0x0001A4C8 via the literal at 0x0001A5B8.  Two 17-byte sync "
+            "patterns at +0 and +0x14, then at +0x28 the four bytes of the "
+            "bit payload the repeat window plays out"
+            % (ERASURE_SRAM, off, ERASURE_N))
 
     off = DCS_SRAM - 0x18000000 + BASE
     emit("ambe_dcs_bins", [s16(raw, off + 2 * i) for i in range(DCS_N)], 8,

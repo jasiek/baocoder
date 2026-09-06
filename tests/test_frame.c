@@ -19,6 +19,8 @@
  *   Vocoder_MatchExcitationEnergy 0x000277F8  here
  *   Vocoder_SynthesizeFrame   0x00019DB8   here, as a sequence
  *   Vocoder_ResetFrameBuffer  0x00019D38   here
+ *   Vocoder_DetectFrameErasure 0x0001A4C8  here
+ *   Vocoder_BumpErrorCounter  0x000220C0   here
  *   the tone branch of Vocoder_SynthesizeFrame, on constructed frames
  *   Tone_ClassifyCtcssDcsCode 0x0001A434   here
  *   Tone_CtcssDcsCodeToTableIndex 0x0001A478 here
@@ -892,6 +894,96 @@ int main(void)
         printf("[the tone branch %d/%d constructed frames bit-exact, %d "
                "continuation and %d shaping, %d amplitudes notched] ",
                tok, tn, cont, shape, notch);
+    }
+
+    {   /* Vocoder_DetectFrameErasure, which is a sync-pattern detector, and
+           the counter that goes with it.  The pattern is seventeen frames of
+           tone codes and the window it opens is 32 frames of a bit payload, so
+           what has to be swept is the match at exactly its threshold - one
+           mismatch accepted, two rejected - and every one of the 32 frames,
+           because each plays a different bit. */
+        FILE *g = fixture_open("frame_erasure.fw");
+        int en = 0, eok = 0, bn = 0, bok = 0, opened = 0, subbed = 0, cleared = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            if (line[0] == 'E') {
+                int16_t st[AMBE_ERASURE_STATE], ref[AMBE_ERASURE_STATE];
+                long pit, slot, rr, rp;
+                int16_t pitch;
+                int got;
+
+                p++;
+                pit  = strtol(p, &p, 10);
+                slot = strtol(p, &p, 10);
+                for (k = 0; k < AMBE_ERASURE_STATE; k++)
+                    st[k] = (int16_t)strtol(p, &p, 10);
+                rr = strtol(p, &p, 10);
+                rp = strtol(p, &p, 10);
+                for (k = 0; k < AMBE_ERASURE_STATE; k++)
+                    ref[k] = (int16_t)strtol(p, &p, 10);
+
+                pitch = (int16_t)pit;
+                got = ambe_detect_frame_erasure(&pitch, st, (int16_t)slot);
+                if (got != (int)rr || pitch != (int16_t)rp) {
+                    CHECK(0, "erasure case %d (pitch %ld slot %ld): returned %d "
+                             "pitch %d, firmware %ld %ld\n", en, pit, slot, got,
+                          (int)pitch, rr, rp);
+                    bad = 1;
+                }
+                for (k = 0; k < AMBE_ERASURE_STATE && !bad; k++)
+                    if (st[k] != ref[k]) {
+                        CHECK(0, "erasure case %d (pitch %ld slot %ld) state[%d]"
+                                 ": %d, firmware %d\n", en, pit, slot, k,
+                              (int)st[k], (int)ref[k]);
+                        bad = 1;
+                    }
+                if (!bad)
+                    eok++;
+                if (ref[0] == 0x20)
+                    opened++;             /* the pattern matched */
+                if (rr == 1)
+                    subbed++;             /* a code came out of the payload */
+                if (pit == 0xff && ref[0] == 0)
+                    cleared++;
+                en++;
+            } else if (line[0] == 'B') {
+                long in, ref;
+                int16_t c;
+
+                p++;
+                in  = strtol(p, &p, 10);
+                ref = strtol(p, &p, 10);
+                c   = (int16_t)in;
+                ambe_bump_error_counter(&c);
+                bn++;
+                if (c == (int16_t)ref)
+                    bok++;
+                else
+                    CHECK(0, "bump(%ld) = %d, firmware %ld\n", in, (int)c, ref);
+            }
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(en > 400, "only %d erasure cases\n", en);
+        CHECK(opened > 3, "only %d cases matched the sync pattern, so the "
+                          "threshold is untested\n", opened);
+        CHECK(subbed > 100, "only %d substitutions, and the payload is 32 bits "
+                            "that each need playing\n", subbed);
+        CHECK(cleared > 0, "nothing carried the 0xFF every speech frame does\n");
+        CHECK(eok == en, "Vocoder_DetectFrameErasure exact on %d of %d\n", eok,
+              en);
+        CHECK(bok == bn, "Vocoder_BumpErrorCounter exact on %d of %d\n", bok,
+              bn);
+        printf("[Vocoder_DetectFrameErasure %d/%d bit-exact, %d sync matches "
+               "and %d payload substitutions; the counter %d/%d] ",
+               eok, en, opened, subbed, bok, bn);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

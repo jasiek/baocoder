@@ -84,6 +84,18 @@ int16_t ambe_tone_bin(int cls, uint16_t code, int16_t flag);
 void ambe_frame_tone_rewrite(int16_t *params, const int16_t *prev,
                              int16_t tone_mode, uint16_t *flags);
 
+/*
+ * Vocoder_DetectFrameErasure 0x0001A4C8.  `state` is 18 shorts: [0] a repeat
+ * counter and [1..0x11] the last seventeen pitch codes, shifted along by every
+ * call.  Returns 1 when it substituted a code from the repeat window, 0
+ * otherwise.  `slot` picks which of the two sync patterns to match.
+ */
+#define AMBE_ERASURE_STATE 18
+int ambe_detect_frame_erasure(int16_t *pitch, int16_t *state, int16_t slot);
+
+/* Vocoder_BumpErrorCounter 0x000220C0: a counter that stops at 100. */
+void ambe_bump_error_counter(int16_t *count);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

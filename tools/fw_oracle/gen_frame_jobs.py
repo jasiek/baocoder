@@ -31,6 +31,8 @@ NORMARR  = 0x0001ADA0
 SHIFTSAT = 0x0001AF5C
 MATCH    = 0x000277F8
 RESETBUF = 0x00019D38
+ERASURE  = 0x0001A4C8
+BUMPERR  = 0x000220C0
 TONECLS  = 0x0001A434
 TONEBIN  = 0x0001A478
 NEXP     = 0x00051A00
@@ -48,6 +50,9 @@ MREFM    = 0x00051C10
 MREFE    = 0x00051C20
 RBLK     = 0x00051D00
 RFLG     = 0x00051E00
+EPIT     = 0x00051F00
+EST      = 0x00051F10
+ECNT     = 0x00051F60
 
 
 def _popcount_cases():
@@ -574,6 +579,79 @@ def _resetbuf_cases():
     return out
 
 
+def _erasure_cases():
+    """(pitch, 18 shorts of state, slot) for Vocoder_DetectFrameErasure.
+
+    The function shifts its seventeen-code history along BEFORE matching, so a
+    case that is supposed to match the pattern has to be pre-shifted: the
+    compared window is `state[2..0x11]` followed by the incoming code, not the
+    state as poked.  Building it any other way silently tests the mismatch path
+    seventeen times over.
+
+    Three things need reaching.  The 0xFF clear, which is what every speech
+    frame does.  The pattern match at exactly its threshold - the function
+    accepts one mismatch of seventeen and rejects two, so the cases sit at
+    zero, one and two.  And the repeat window, all 32 frames of it, because the
+    code it substitutes walks one bit of a 32-bit payload per frame and a sweep
+    that only tries a few counters tests only a few bits.
+    """
+    out = []
+    x = 246810
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    # the patterns, read out of the image the same way the firmware does
+    with open(emu.FIRMWARE, "rb") as fh:
+        fh.seek(emu.SRAM_FILE_OFF + 0x1170)
+        pat = list(fh.read(0x2c))
+
+    def matching(slot, wrong):
+        """A state whose shifted window is the slot's pattern, `wrong` entries
+        corrupted, and the code that completes it."""
+        p = pat[0 if slot == 1 else 0x14:][:17]
+        st = [0] * 18
+        for i in range(16):
+            st[2 + i] = p[i]
+        for i in range(wrong):
+            st[2 + i * 5] = 0x30 + i          # not a code the pattern holds
+        return p[16], st
+
+    for slot in (1, 0, 2, -1):
+        for wrong in (0, 1, 2, 3):
+            code, st = matching(slot, wrong)
+            out.append((code, list(st), slot))
+            # and with the last code wrong instead of an earlier one
+            out.append((0x31, list(st), slot))
+    # the repeat window, every one of its 32 frames
+    for slot in (1, 0):
+        for counter in range(1, 0x21):
+            for code in (0x13, 0x14, 0x15, 0x16):
+                st = [0] * 18
+                st[0] = counter
+                out.append((code, st, slot))
+    # the guards either side of it
+    for counter in (-1, 0, 1, 0x20, 0x7fff):
+        for code in (0x12, 0x13, 0x16, 0x17, 0xff, 0, -1):
+            st = [0] * 18
+            st[0] = counter
+            out.append((code, st, 1))
+    while len(out) < 420:
+        st = [rnd(0x10000) - 0x8000 for _ in range(18)]
+        st[0] = rnd(0x40) - 8
+        out.append((rnd(0x120) - 8, st, rnd(3)))
+    return out
+
+
+def _bumperr_cases():
+    """Counter values for Vocoder_BumpErrorCounter 0x000220C0, around its
+    clamp at 100 and at the ends of the short."""
+    return [0, 1, 50, 98, 99, 100, 101, 200, -1, -100, 0x7fff, -0x8000,
+            0x7ffe, 32767 - 1]
+
+
 def _tone_class_cases():
     """Tone codes for Tone_ClassifyCtcssDcsCode 0x0001A434.
 
@@ -693,6 +771,18 @@ def gen(jobfile):
         j.poke(RFLG, b"\xEE" * (56 * 2))
         j.call(RESETBUF, RBLK)
         j.peek("rb%d" % i, RFLG, 56 * 2)
+    for i, (pit, st, slot) in enumerate(_erasure_cases()):
+        j.poke(EPIT, struct.pack("<h", pit if pit <= 0x7FFF else pit - 0x10000))
+        j.poke(EST, struct.pack("<18h", *[v - 0x10000 if v > 0x7FFF else v
+                                          for v in st]))
+        j.call(ERASURE, EPIT, EST, slot & 0xFFFFFFFF)
+        j.getreg("r0")
+        j.peek("ep%d" % i, EPIT, 2)
+        j.peek("es%d" % i, EST, 18 * 2)
+    for i, v in enumerate(_bumperr_cases()):
+        j.poke(ECNT, struct.pack("<h", v))
+        j.call(BUMPERR, ECNT - 0x86)
+        j.peek("ec%d" % i, ECNT, 2)
     for c in _tone_class_cases():
         j.call(TONECLS, c & 0xFFFFFFFF)
         j.getreg("r0")
@@ -853,6 +943,29 @@ def export(outfile, destdir):
                 " ".join(map(str, o)), eo, mo, ro))
             m += 1
     print("%s: %d cases" % (dest, m))
+    dest = os.path.join(destdir, "frame_erasure.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_DetectFrameErasure 0x0001A4C8 and\n"
+                 "# Vocoder_BumpErrorCounter 0x000220C0, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: E pitch slot, 18 shorts of state in, then the\n"
+                 "# return value, the pitch left behind and the 18 shorts out;\n"
+                 "# or B counterIn counterOut.\n")
+        m = 0
+        for i, (pit, st, slot) in enumerate(_erasure_cases()):
+            po = struct.unpack("<h", res["peek"]["ep%d" % i][0])[0]
+            so = struct.unpack("<18h", res["peek"]["es%d" % i][0])
+            fh.write("E %d %d %s %d %d %s\n" % (
+                pit, slot, " ".join(map(str, st)), r0[k], po,
+                " ".join(map(str, so))))
+            k += 1
+            m += 1
+        for i, v in enumerate(_bumperr_cases()):
+            o = struct.unpack("<h", res["peek"]["ec%d" % i][0])[0]
+            fh.write("B %d %d\n" % (v, o))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
     dest = os.path.join(destdir, "frame_resetbuf.fw")
     with open(dest, "w") as fh:
         fh.write("# Vocoder_ResetFrameBuffer 0x00019D38, executed under the p-code\n"

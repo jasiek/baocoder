@@ -51,6 +51,10 @@ extern const short ambe_cos512_q15[512];     /* Math_TableInterpLookup   */
    codes 0x80..0xA3, two harmonic bins each, returned minus one. */
 extern const short ambe_dcs_bins[72];
 
+/* Vocoder_DetectFrameErasure 0x0001A4C8's sync patterns and bit payload,
+   SRAM 0x18001170: 17 bytes per slot at +0 and +0x14, four more at +0x28. */
+extern const unsigned char ambe_erasure_pattern[0x2c];
+
 /*
  * The speech analyser's window, SRAM 0x180010A8.  Vocoder_ProcessFrame
  * 0x00016E04 - which takes PCM in, and is the encoder front end despite

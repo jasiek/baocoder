@@ -1336,3 +1336,75 @@ void ambe_frame_tone_rewrite(int16_t *params, const int16_t *prev,
                 ambe_shl32((int32_t)code, 20), (int16_t)((params[3] + 1) * 0x100));
     }
 }
+
+/*
+ * Vocoder_DetectFrameErasure 0x0001A4C8, and it is not an erasure detector.
+ *
+ * It watches the pitch field across frames and looks for a seventeen-frame
+ * SYNC PATTERN in it - a fixed sequence of the tone codes 0x14, 0x15 and 0x16,
+ * one pattern per slot, at SRAM 0x18001170 and +0x14.  The last seventeen codes
+ * are kept in `state[1..0x11]`, shifted along by one on every call, and matched
+ * against the pattern; at most one mismatch of the seventeen sets a counter to
+ * 32.
+ *
+ * What the counter then does is the interesting part.  For the next 32 frames,
+ * any incoming code in 0x13..0x16 is DISCARDED and replaced by one this
+ * function generates: four bytes at SRAM 0x18001198 assembled into
+ * 0x40B3EA1B, XORed with the literal 0x3C670CE3 at 0x0001A5BC, and walked one
+ * bit per frame from the bottom - `0x15` for a zero bit and `0x14` for a one.
+ * So the pattern is a preamble and what follows it is 32 bits of payload
+ * carried in the pitch field, and the radio replaces what it received with
+ * what it knows the sequence must be.  This is signalling inside the vocoder's
+ * own parameter, not a codec feature at all.
+ *
+ * A code of 0xFF - the value every speech frame carries - clears the counter
+ * and returns without matching anything, which is why 617 frames of real
+ * speech never touch any of this.
+ */
+int ambe_detect_frame_erasure(int16_t *pitch, int16_t *state, int16_t slot)
+{
+    const unsigned char *pat = ambe_erasure_pattern + (slot == 1 ? 0 : 0x14);
+    int16_t code;
+    int i, n;
+
+    for (i = 0; i < 0x10; i++)              /* Dsp_CopyShortArray 0x0001947C */
+        state[1 + i] = state[2 + i];
+    state[0x11] = *pitch;
+
+    code = *pitch;
+    if (code == 0xff) {
+        state[0] = 0;
+        return 0;
+    }
+    if (state[0] > 0 && code > 0x12 && code < 0x17) {
+        uint32_t w = ((uint32_t)ambe_erasure_pattern[0x28] << 24)
+                   | (uint32_t)ambe_erasure_pattern[0x2b]
+                   | ((uint32_t)ambe_erasure_pattern[0x29] << 16)
+                   | (((uint32_t)ambe_erasure_pattern[0x2a] << 8) & 0xffff);
+        int sh = (int16_t)(0x20 - state[0]);
+
+        *pitch = (int16_t)(0x15 - (ambe_asr_hw((int32_t)(w ^ 0x3c670ce3u), sh)
+                                   & 1));
+        state[0] = (int16_t)(state[0] - 1);
+        return 1;
+    }
+    state[0] = 0;
+    n = 0x11;
+    for (i = 0; i < 0x11; i++)
+        if (state[1 + i] == (int16_t)(uint16_t)pat[i])
+            n = (int16_t)(n - 1);
+    if ((int16_t)n < 2)
+        state[0] = 0x20;
+    return 0;
+}
+
+/*
+ * Vocoder_BumpErrorCounter 0x000220C0.  Twenty bytes, and the only reason it
+ * is here is that Vocoder_ProcessFrameSignaling calls it on every path and a
+ * transcription of that function without it would drift.
+ */
+void ambe_bump_error_counter(int16_t *count)
+{
+    if (*count < 100)
+        *count = (int16_t)(*count + 1);
+}
