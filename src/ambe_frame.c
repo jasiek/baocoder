@@ -121,12 +121,10 @@ void ambe_frame_params_copy(int16_t *dst, const int16_t *src)
  *
  * Any other class leaves the array untouched, which includes the erasure class.
  *
- * The tone branch needs Tone_ClassifyCtcssDcsCode 0x0002B0F4 to tell a CTCSS or
- * DCS code from a single tone, and this project has no transcription of it.
- * Tone frames are classified and muted rather than synthesised - README,
- * "Limitations" - and the corpus holds two of them in 2052 frames, so the branch
- * is left explicit and unimplemented rather than guessed at: it returns without
- * touching the flags and says so.
+ * The tone branch reads Tone_ClassifyCtcssDcsCode 0x0001A434 - which is at
+ * 0x0001A434 and not the 0x0002B0F4 an earlier version of this comment cited -
+ * to tell a CTCSS tone from a DCS pair, and sets one flag or two accordingly.
+ * The corpus holds two tone frames in 2052, so nothing here exercises it.
  */
 void ambe_frame_reset_buffer(int16_t *params, uint16_t *flags)
 {
@@ -142,7 +140,14 @@ void ambe_frame_reset_buffer(int16_t *params, uint16_t *flags)
         return;
     case 3:
         memset(flags, 0, 0x38 * sizeof(uint16_t));
-        /* the tone bins would be set here; see the comment above */
+        /* one bin for a CTCSS tone at [3], two for a DCS pair, which [3]
+           carries as two bytes rather than as an index */
+        if (ambe_tone_class(params[1]) == 0) {
+            flags[params[3]] = 1;
+        } else if ((unsigned)ambe_tone_class(params[1]) < 4) {
+            flags[(uint16_t)params[3] >> 8]   = 1;
+            flags[(uint16_t)params[3] & 0xff] = 1;
+        }
         return;
     default:
         return;
@@ -1205,4 +1210,50 @@ void ambe_frame_synthesize(int16_t *params, int16_t *pcm, int n, int repeat,
     params[0x40] = 0;
     params[0x41] = 0;
     ambe_frame_params_copy(st->prev, params);
+}
+
+/*
+ * Tone_ClassifyCtcssDcsCode 0x0001A434 and Tone_CtcssDcsCodeToTableIndex
+ * 0x0001A478.
+ *
+ * These two are why the tone branches in this file were holes, and they are 66
+ * and 74 bytes.  Nothing about them was hard; they were simply never read.
+ *
+ * The classifier splits the tone code into five families by range - 5..0x7A
+ * CTCSS, 0x80..0x8F DCS, 0x90..0x9F DCS inverted, 0xA0..0xA3 a fourth group,
+ * anything else none - and the index function turns a code into the harmonic
+ * bin it occupies.  For CTCSS that is a closed form, `ceil(code * 5 / 64) - 1`
+ * floored at zero, written the way the machine writes it: multiply by 0x5000,
+ * double, arithmetic-shift down three, add 0xFFFF and take the high half,
+ * which is the ceiling.  For the three DCS families it is a table lookup at
+ * SRAM 0x1800331C, two bins per code because a DCS tone is a pair, and the
+ * entry is returned MINUS ONE - so the table holds 1-based harmonic numbers
+ * and the codec wants 0-based.
+ */
+int ambe_tone_class(int16_t code)
+{
+    if ((uint16_t)(code - 5) < 0x76)
+        return 0;
+    if ((uint16_t)(code - 0x80) < 0x10)
+        return 1;
+    if ((uint16_t)(code - 0x90) < 0x10)
+        return 2;
+    if ((uint16_t)(code - 0xa0) < 4)
+        return 3;
+    return 4;
+}
+
+int16_t ambe_tone_bin(int cls, uint16_t code, int16_t flag)
+{
+    int16_t v;
+
+    if (cls == 0) {
+        int32_t t = (int32_t)((uint32_t)((int32_t)(int16_t)code * 0x5000) * 2u);
+
+        v = (int16_t)(((uint32_t)(ambe_asr_hw(t, 3) + 0xffff) >> 16) - 1);
+        return v < 0 ? 0 : v;
+    }
+    if ((unsigned)cls < 4)
+        return (int16_t)(ambe_dcs_bins[((int16_t)code - 0x80) * 2 + flag] - 1);
+    return 0;
 }

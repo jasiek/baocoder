@@ -18,6 +18,9 @@
  *   Math_ArrayShiftSaturate   0x0001AF5C   here
  *   Vocoder_MatchExcitationEnergy 0x000277F8  here
  *   Vocoder_SynthesizeFrame   0x00019DB8   here, as a sequence
+ *   Vocoder_ResetFrameBuffer  0x00019D38   here
+ *   Tone_ClassifyCtcssDcsCode 0x0001A434   here
+ *   Tone_CtcssDcsCodeToTableIndex 0x0001A478 here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -682,6 +685,144 @@ int main(void)
         printf("[Vocoder_SynthesizeFrame %d/%d calls carrying its own state, "
                "%d samples, block and state; %d voice %d silence] ",
                fok, fn, fn * 80, voice, silence);
+    }
+
+    {   /* the two tone classifiers, which were holes in this file until they
+           were read and turned out to be 66 and 74 bytes.  Both are pure, so
+           they sweep: every code around all four of the classifier's range
+           boundaries, and for the index function the whole CTCSS closed form
+           plus every DCS code the classifier can hand it. */
+        FILE *g = fixture_open("frame_toneclass.fw");
+        int cn = 0, cok = 0, bn = 0, bok = 0, dcs = 0, satur = 0;
+        int seen[5];
+        int fam;
+
+        for (fam = 0; fam < 5; fam++)
+            seen[fam] = 0;
+        while (getline(&line, &cap, g) > 0) {
+            char *p = line;
+
+            if (line[0] == '#')
+                continue;
+            if (line[0] == 'C') {
+                long code, ref;
+                int got;
+
+                p++;
+                code = strtol(p, &p, 10);
+                ref  = strtol(p, &p, 10);
+                got  = ambe_tone_class((int16_t)code);
+                cn++;
+                if (got == (int)ref)
+                    cok++;
+                else
+                    CHECK(0, "tone class(%ld) = %d, firmware %ld\n", code, got,
+                          ref);
+                if (ref >= 0 && ref < 5)
+                    seen[ref]++;
+            } else if (line[0] == 'B') {
+                long cls, code, flag, ref;
+                int16_t got;
+
+                p++;
+                cls  = strtol(p, &p, 10);
+                code = strtol(p, &p, 10);
+                flag = strtol(p, &p, 10);
+                ref  = strtol(p, &p, 10);
+                got  = ambe_tone_bin((int)cls, (uint16_t)code, (int16_t)flag);
+                bn++;
+                if (got == (int16_t)ref)
+                    bok++;
+                else
+                    CHECK(0, "tone bin(%ld, %ld, %ld) = %d, firmware %ld\n",
+                          cls, code, flag, (int)got, ref);
+                if (cls >= 1 && cls < 4)
+                    dcs++;
+                if (cls == 0 && ref == 0)
+                    satur++;
+            }
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        for (fam = 0; fam < 5; fam++)
+            CHECK(seen[fam] > 0, "no code classified %d, so that range is "
+                                 "untested\n", fam);
+        CHECK(dcs > 100, "only %d DCS lookups, and the table is 72 entries\n",
+              dcs);
+        CHECK(satur > 0, "nothing hit the floor at zero, where the CTCSS form "
+                         "would otherwise return -1\n");
+        CHECK(cok == cn, "Tone_ClassifyCtcssDcsCode exact on %d of %d\n", cok,
+              cn);
+        CHECK(bok == bn, "Tone_CtcssDcsCodeToTableIndex exact on %d of %d\n",
+              bok, bn);
+        printf("[the tone classifiers %d + %d cases bit-exact, all five "
+               "families and %d DCS lookups] ", cok, bok, dcs);
+    }
+
+    {   /* Vocoder_ResetFrameBuffer: the voicing flags, per frame class.  The
+           tone branch is the point - the corpus has no tone frame at all, so a
+           sweep is the only thing that reaches it, and the destination is
+           poked 0xEEEE so a class the function leaves alone is visible as
+           having been left alone rather than as a zero it chose. */
+        FILE *g = fixture_open("frame_resetbuf.fw");
+        int rn = 0, rok = 0, tone = 0, pair = 0, untouched = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t blk[68];
+            uint16_t ref[0x38], got[0x38];
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            for (k = 0; k < 68; k++)   blk[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 0x38; k++) ref[k] = (uint16_t)strtoul(p, &p, 10);
+
+            for (k = 0; k < 0x38; k++)
+                got[k] = 0xEEEE;
+            ambe_frame_reset_buffer(blk, got);
+            for (k = 0; k < 0x38; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "resetbuf case %d (class %d code %d) flag %d: %u, "
+                             "firmware %u\n", rn, (int)blk[0], (int)blk[1], k,
+                          (unsigned)got[k], (unsigned)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                rok++;
+            if (blk[0] == 3) {
+                int set = 0;
+
+                for (k = 0; k < 0x38; k++)
+                    if (ref[k] == 1)
+                        set++;
+                tone++;
+                if (set == 2)
+                    pair++;          /* a DCS pair, two bins rather than one */
+            }
+            if (ref[0] == 0xEEEE)
+                untouched++;
+            rn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(rn > 200, "only %d reset-buffer cases\n", rn);
+        CHECK(tone > 50, "only %d tone frames, and they are the branch nothing "
+                         "else reaches\n", tone);
+        CHECK(pair > 10, "only %d DCS pairs, so the two-bin path is untested\n",
+              pair);
+        CHECK(untouched > 0, "no case left the array alone, so the classes the "
+                             "function does not handle are untested\n");
+        CHECK(rok == rn, "Vocoder_ResetFrameBuffer exact on %d of %d\n", rok,
+              rn);
+        printf("[Vocoder_ResetFrameBuffer %d/%d bit-exact, %d tone frames of "
+               "which %d DCS pairs, %d left untouched] ", rok, rn, tone, pair,
+               untouched);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

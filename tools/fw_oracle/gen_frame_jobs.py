@@ -30,6 +30,9 @@ SHIFTCPY = 0x0001AB58
 NORMARR  = 0x0001ADA0
 SHIFTSAT = 0x0001AF5C
 MATCH    = 0x000277F8
+RESETBUF = 0x00019D38
+TONECLS  = 0x0001A434
+TONEBIN  = 0x0001A478
 NEXP     = 0x00051A00
 ASRC     = 0x00051800
 ADST     = 0x00051900
@@ -43,6 +46,8 @@ MAMP     = 0x00051B00
 MEXP     = 0x00051C00
 MREFM    = 0x00051C10
 MREFE    = 0x00051C20
+RBLK     = 0x00051D00
+RFLG     = 0x00051E00
 
 
 def _popcount_cases():
@@ -489,6 +494,124 @@ def _match_saturating_cases(per_count=3):
     return out
 
 
+def _resetbuf_cases():
+    """68-short parameter blocks for Vocoder_ResetFrameBuffer 0x00019D38.
+
+    The function fills the per-harmonic voicing flags from the frame class in
+    [0], and each of the four classes is a different thing:
+
+      1  the voicing word expanded per harmonic, which is
+         Vocoder_BuildFrameResetPattern and is swept in tests/test_unvoiced.c
+         as well - here it is reached through this function's own dispatch;
+      2  cleared;
+      3  cleared, then ONE flag set at [3] for a CTCSS tone or TWO for a DCS
+         pair, whose two bins [3] carries as its high and low bytes.  This is
+         the branch that was a hole until Tone_ClassifyCtcssDcsCode was read,
+         and the corpus contains no tone frame at all, so a sweep is the only
+         thing that can reach it;
+      anything else, including the erasure class, leaves the array alone -
+      which is why the destination is poked 0xEEEE first.
+
+    The tone codes cover all five of the classifier's families, and the bins
+    stay under 0x38: the stock code does not range-check them, so a code with a
+    byte past the array is the firmware scribbling rather than a function.
+    """
+    out = []
+    x = 13579
+
+    def rnd(mod):
+        nonlocal x
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        return (x >> 7) % mod
+
+    def blk(cls, p1, L, p3, vuv, f0):
+        b = [0] * 68
+        b[0] = cls
+        b[1] = p1
+        b[2] = L
+        b[3] = p3
+        b[4] = vuv & 0xFFFF
+        b[5] = (vuv >> 16) & 0xFFFF
+        b[6] = f0
+        return b
+
+    def family(code):
+        """Tone_ClassifyCtcssDcsCode, in Python, so a case can be built with a
+        bin index the branch it will take can actually address."""
+        if 5 <= (code & 0xFFFF) - 0 and (code - 5) & 0xFFFF < 0x76:
+            return 0
+        if (code - 0x80) & 0xFFFF < 0x10:
+            return 1
+        if (code - 0x90) & 0xFFFF < 0x10:
+            return 2
+        if (code - 0xA0) & 0xFFFF < 4:
+            return 3
+        return 4
+
+    def bins(code, a, b):
+        """[3] holds ONE index for a CTCSS tone and a packed PAIR for a DCS
+        one, and the stock code range-checks neither.  Both have to stay under
+        0x38 or the firmware writes past the array and the fixture records a
+        scribble."""
+        return a if family(code) == 0 else ((a << 8) | b)
+
+    for cls in (0, 1, 2, 3, 4, -1):
+        for vuv in (0, 0x55555555, 0xFFFFFFFF, 0xAAAAAAAA, 0x0F0F0F0F):
+            for L in (1, 9, 0x20, 0x37, 0x38):
+                out.append(blk(cls, 0xff, L, 0, vuv, 0x1079))
+    # class 3, every family the classifier separates
+    for code in (0, 4, 5, 0x40, 0x7a, 0x7b, 0x80, 0x88, 0x8f, 0x90, 0x9f,
+                 0xa0, 0xa3, 0xa4, 0xff):
+        for a, b in ((0, 0), (1, 0), (0x10, 0x10), (0x23, 0x37), (5, 0x37),
+                     (0x37, 1)):
+            out.append(blk(3, code, 0x20, bins(code, a, b), 0, 0x1079))
+    while len(out) < 260:
+        cls = rnd(5)
+        code = rnd(0x100)
+        p3 = bins(code, rnd(0x38), rnd(0x38)) if cls == 3 else rnd(0x38)
+        out.append(blk(cls, code, 1 + rnd(0x38), p3,
+                       (rnd(0x10000) << 16) | rnd(0x10000), 1 + rnd(0x4000)))
+    return out
+
+
+def _tone_class_cases():
+    """Tone codes for Tone_ClassifyCtcssDcsCode 0x0001A434.
+
+    Five ranges with four boundaries between them, and the ranges are written
+    as `(ushort)(code - lo) < len`, so what has to be swept is every code around
+    each boundary and enough outside them to say the wraparound cannot let a
+    negative code in.  [-0x30, 0x140] covers all four boundaries exhaustively.
+    """
+    out = [c for c in range(-0x30, 0x141)]
+    out += [-0x8000, -0x7FFF, -1, 0x7FFF, 0x1000, 0x8000 - 0x10000]
+    x = 909090
+    for _ in range(300):
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append(((x >> 7) & 0xFFFF) - 0x8000)
+    return out
+
+
+def _tone_bin_cases():
+    """(category, code, flag) for Tone_CtcssDcsCodeToTableIndex 0x0001A478.
+
+    Category 0 is a closed form and total, so it is swept over the same range
+    as the classifier.  Categories 1..3 are a table lookup indexed
+    `(code - 0x80) * 2 + flag` with NO range check, so the sweep stays inside
+    the 36 codes the classifier can put there - anything else has the firmware
+    reading past the table, which is a fixture recording a bug rather than a
+    function.  Categories 4 and up return zero and are swept for that.
+    """
+    out = [(0, c, 0) for c in range(-0x30, 0x141)]
+    out += [(0, c, 1) for c in (5, 0x7A, 0x7FFF, -0x8000)]
+    for cls in (1, 2, 3):
+        for code in range(0x80, 0xA4):
+            for flag in (0, 1):
+                out.append((cls, code, flag))
+    out += [(4, c, 0) for c in (0, 5, 0x80, 0xFF)]
+    out += [(5, 0x80, 0), (0x7FFF, 0x80, 1)]
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -552,6 +675,30 @@ def gen(jobfile):
         j.peek("mx%d" % i, MEXP, 2)
         j.peek("mm%d" % i, MREFM, 2)
         j.peek("mr%d" % i, MREFE, 2)
+    for i, b in enumerate(_resetbuf_cases()):
+        blk = list(b)
+        blk[0x40] = RFLG & 0xFFFF
+        blk[0x41] = (RFLG >> 16) & 0xFFFF
+        j.poke(RBLK, struct.pack("<68h", *[v - 0x10000 if v > 0x7FFF else v
+                                           for v in blk]))
+        j.poke(RFLG, b"\xEE" * (56 * 2))
+        j.call(RESETBUF, RBLK)
+        j.peek("rb%d" % i, RFLG, 56 * 2)
+    for i, b in enumerate(_resetbuf_cases()):
+        rblk = list(b)
+        rblk[0x40] = RFLG & 0xFFFF
+        rblk[0x41] = (RFLG >> 16) & 0xFFFF
+        j.poke(RBLK, struct.pack("<68h", *[v - 0x10000 if v > 0x7FFF else v
+                                           for v in rblk]))
+        j.poke(RFLG, b"\xEE" * (56 * 2))
+        j.call(RESETBUF, RBLK)
+        j.peek("rb%d" % i, RFLG, 56 * 2)
+    for c in _tone_class_cases():
+        j.call(TONECLS, c & 0xFFFFFFFF)
+        j.getreg("r0")
+    for cls, code, flag in _tone_bin_cases():
+        j.call(TONEBIN, cls & 0xFFFFFFFF, code & 0xFFFFFFFF, flag & 0xFFFFFFFF)
+        j.getreg("r0")
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -704,6 +851,40 @@ def export(outfile, destdir):
             fh.write("%d %d %d %d %d %s %s %d %d %d\n" % (
                 count, pitch, e, rm, re, " ".join(map(str, a)),
                 " ".join(map(str, o)), eo, mo, ro))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+    dest = os.path.join(destdir, "frame_resetbuf.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Vocoder_ResetFrameBuffer 0x00019D38, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: 68 shorts of parameter block, then the 56 voicing\n"
+                 "# flags it left.  The flags are poked 0xEEEE first, so a class the\n"
+                 "# function does not handle reads as 61166 rather than as a zero it\n"
+                 "# chose.  [0x40..0x41] is repointed at the poked array and is\n"
+                 "# recorded as the emulator's address.\n")
+        m = 0
+        for i, b in enumerate(_resetbuf_cases()):
+            o = struct.unpack("<56H", res["peek"]["rb%d" % i][0])
+            fh.write("%s %s\n" % (" ".join(map(str, b)), " ".join(map(str, o))))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_toneclass.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Tone_ClassifyCtcssDcsCode 0x0001A434 and\n"
+                 "# Tone_CtcssDcsCodeToTableIndex 0x0001A478, executed under the\n"
+                 "# p-code emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: C code class, or B category code flag bin.\n")
+        m = 0
+        for c in _tone_class_cases():
+            fh.write("C %d %d\n" % (c, r0[k]))
+            k += 1
+            m += 1
+        for cls, code, flag in _tone_bin_cases():
+            fh.write("B %d %d %d %d\n" % (cls, code, flag,
+                                           (r0[k] & 0xFFFF) - 0x10000
+                                           if r0[k] & 0x8000 else r0[k] & 0xFFFF))
+            k += 1
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)

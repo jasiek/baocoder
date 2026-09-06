@@ -1059,6 +1059,19 @@ const short ambe_subband_dft_q15[480] = {
     -32138,  30274, -27246,  23170, -18205,  12540,  -6393,      0
 };
 
+/* SRAM 0x1800331C, file 0x0669DC, 72 x int16 - Tone_CtcssDcsCodeToTableIndex 0x0001A478 via the literal at 0x0001A4C4.  36 DCS codes 0x80..0xA3, two harmonic bins each, and the function returns the entry MINUS ONE */
+const short ambe_dcs_bins[72] = {
+        12,     17,      4,      7,     10,     19,      8,     17,
+         7,     11,      4,      7,     11,     21,     12,     17,
+         7,     11,      4,      7,      6,     14,      8,     17,
+        12,     23,      4,      7,      7,      9,      7,     11,
+        12,     17,      4,      7,      9,     17,      7,     15,
+         7,     11,      4,      7,     10,     19,     10,     14,
+         7,     11,      8,     14,      6,     14,      8,     17,
+        11,     21,      8,     14,      7,      9,      7,     11,
+         4,      5,      6,      7,      4,      5,      5,      7
+};
+
 /* SRAM 0x18003628, file 0x066CE8, 128 x uint32.  Two bits per voicing band,
  * most significant crumb first; the low bit of each crumb is the band's
  * voiced flag.  Vocoder_DecodeSpectralCodebookEntry 0x00022DB4 indexes this

@@ -63,6 +63,18 @@ void ambe_match_excitation_energy(int16_t *amps, int16_t *exp_io,
                                   int16_t *ref_mant, int16_t *ref_exp,
                                   int16_t pitch, int16_t count);
 
+/*
+ * Tone_ClassifyCtcssDcsCode 0x0001A434: which family a tone code belongs to.
+ * 0 CTCSS, 1 DCS, 2 DCS inverted, 3 a fourth group of four codes, 4 none.
+ */
+int ambe_tone_class(int16_t code);
+
+/*
+ * Tone_CtcssDcsCodeToTableIndex 0x0001A478: the harmonic bin a tone code
+ * occupies.  `flag` picks which of a DCS pair; it is ignored for CTCSS.
+ */
+int16_t ambe_tone_bin(int cls, uint16_t code, int16_t flag);
+
 /* Math_SqrtScaled 0x000193E0 */
 uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q);
 

@@ -228,6 +228,14 @@ MATH_TABLES = [
      "then 16 negated sines, the 32-point real DFT's bins 1..15"),
 ]
 
+# Tone_CtcssDcsCodeToTableIndex 0x0001A478 reads this through the literal at
+# 0x0001A4C4, whose value is 0x1800331C.  36 DCS codes - 0x80..0xA3, the three
+# DCS categories Tone_ClassifyCtcssDcsCode separates - two harmonic bins each,
+# and the function returns the entry minus one.  Not Q anything: these are
+# harmonic indices, 4..23, and the two per code are the tone pair.
+DCS_SRAM = 0x1800331c
+DCS_N = 36 * 2
+
 LMPRBL_SRAM = 0x18002030
 LMPRBL_N = 48             # L = 9..56
 VUV_SRAM = 0x18003628     # 128 x uint32, 2 bits per voicing band
@@ -285,6 +293,13 @@ def main():
         emit(name, vals, per_line,
              "SRAM 0x%08X, file 0x%06X, %d x int16 Q15 - %s"
              % (sram, off, count, owner))
+
+    off = DCS_SRAM - 0x18000000 + BASE
+    emit("ambe_dcs_bins", [s16(raw, off + 2 * i) for i in range(DCS_N)], 8,
+         "SRAM 0x%08X, file 0x%06X, %d x int16 - Tone_CtcssDcsCodeToTableIndex "
+         "0x0001A478 via the literal at 0x0001A4C4.  36 DCS codes 0x80..0xA3, "
+         "two harmonic bins each, and the function returns the entry MINUS ONE"
+         % (DCS_SRAM, off, DCS_N))
 
     # block lengths: unpack the nibbles into a plain [57][4], L = 0..56
     off = LMPRBL_SRAM - 0x18000000 + BASE

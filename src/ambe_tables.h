@@ -47,6 +47,10 @@ extern const short ambe_pow2_coeff_q15[6];   /* Math_Pow2 0x000191C0     */
 extern const short ambe_sqrt_coeff_q15[12];  /* Math_Sqrt 0x00019364     */
 extern const short ambe_cos512_q15[512];     /* Math_TableInterpLookup   */
 
+/* Tone_CtcssDcsCodeToTableIndex 0x0001A478's DCS table, SRAM 0x1800331C: 36
+   codes 0x80..0xA3, two harmonic bins each, returned minus one. */
+extern const short ambe_dcs_bins[72];
+
 /*
  * The speech analyser's window, SRAM 0x180010A8.  Vocoder_ProcessFrame
  * 0x00016E04 - which takes PCM in, and is the encoder front end despite
