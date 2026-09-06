@@ -14,6 +14,7 @@
  *   Vocoder_NormalizeSpectralBlock 0x00022C18   here
  *   Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8 here
  *   Dsp_HilbertTransform      0x00029D1C   here
+ *   Dsp_NormalizeArray        0x0001ADA0   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -348,6 +349,68 @@ int main(void)
         CHECK(cok == cn, "Math_ArrayShiftCopy exact on %d of %d\n", cok, cn);
         printf("[Math_ArrayShiftCopy %d/%d bit-exact, %d values shifted past "
                "the top] ", cok, cn, lost);
+    }
+
+    {   /* Dsp_NormalizeArray, whose two special cases are the interesting
+           ones: an all-zero block leaves the caller's exponent alone, and a
+           block whose only extreme is -0x8000 exposes the true negation */
+        FILE *g = fixture_open("frame_normarray.fw");
+        int an = 0, aok = 0, zero = 0, extreme = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t src[32], ref[32], got[32];
+            long count, ein, refe;
+            int16_t e;
+            char *p = line;
+            int k, bad = 0, allzero = 1;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            ein   = strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) src[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+            refe = strtol(p, &p, 10);
+
+            for (k = 0; k < 32; k++)
+                got[k] = (int16_t)0xEEEE;
+            e = (int16_t)ein;
+            ambe_normalize_array(got, src, (int)count, &e);
+            if (e != (int16_t)refe) {
+                CHECK(0, "normarray case %d (count %ld exp %ld): exponent %d, "
+                         "firmware %ld\n", an, count, ein, (int)e, refe);
+                bad = 1;
+            }
+            for (k = 0; k < 32 && !bad; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "normarray case %d (count %ld) slot %d: %d, "
+                             "firmware %d\n", an, count, k, (int)got[k],
+                          (int)ref[k]);
+                    bad = 1;
+                }
+            if (!bad)
+                aok++;
+            for (k = 0; k < count; k++) {
+                if (src[k] != 0)
+                    allzero = 0;
+                if (src[k] == -0x8000)
+                    extreme++;
+            }
+            if (count > 0 && allzero)
+                zero++;
+            an++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(an > 200, "only %d normalise-array cases\n", an);
+        CHECK(zero > 0, "no all-zero block, where the exponent is left alone\n");
+        CHECK(extreme > 0, "no -0x8000, where a true negation and a saturating "
+                           "one part company\n");
+        CHECK(aok == an, "Dsp_NormalizeArray exact on %d of %d\n", aok, an);
+        printf("[Dsp_NormalizeArray %d/%d bit-exact, %d all-zero blocks and %d "
+               "values at -0x8000] ", aok, an, zero, extreme);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

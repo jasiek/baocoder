@@ -20,6 +20,7 @@
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   here
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   here
  *   Dsp_HilbertTransform               0x00029D1C   here
+ *   Dsp_NormalizeArray                 0x0001ADA0   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -436,4 +437,55 @@ void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift)
         else
             dst[i] = (int16_t)ambe_lsl_hw((int32_t)src[i], shift);
     }
+}
+
+/*
+ * Dsp_NormalizeArray 0x0001ADA0.
+ *
+ * Find the largest magnitude in the array, shift the whole array up by the
+ * headroom that leaves, and SUBTRACT that shift from the exponent the caller is
+ * carrying - so the value the pair represents does not change, only where its
+ * bits sit.
+ *
+ * Two details are the stock code's and neither is obvious:
+ *
+ *   the magnitude is `~v + 1` on a negative value, which is a true negation and
+ *   so turns -0x8000 into -0x8000 rather than saturating.  The comparison that
+ *   follows is signed, so that one value compares as smaller than everything
+ *   rather than larger - a block whose only extreme is -0x8000 normalises as if
+ *   its peak were whatever is next largest;
+ *
+ *   an all-zero array is not a special case of the general one.  It copies with
+ *   a shift of zero and writes the exponent back UNCHANGED - `*pOutExponent =
+ *   *pOutExponent`, which reads as a no-op and is the point: the caller's
+ *   exponent survives a silent block instead of being driven to a floor.
+ */
+void ambe_normalize_array(int16_t *dst, const int16_t *src, int count,
+                          int16_t *exp_io)
+{
+    uint32_t peak = 0;
+    int i, sh;
+
+    if (count < 1) {
+        ambe_array_shift_copy(dst, src, count, 0);
+        return;                       /* the exponent is left as it was */
+    }
+    for (i = 0; i < (int)((((uint32_t)(uint16_t)count - 1) & 0xffff) + 1); i++) {
+        uint32_t m = (uint32_t)(int32_t)src[i];
+
+        if ((int32_t)m < 0)
+            m = ~m + 1;
+        if ((int32_t)peak < (int32_t)m)
+            peak = m;
+    }
+    peak <<= 16;
+    if (peak == 0) {
+        ambe_array_shift_copy(dst, src, count, 0);
+        return;
+    }
+    if (peak & 0x80000000u)
+        peak = ~peak;
+    sh = (int16_t)(ambe_lzcount32(peak) - 1u);
+    ambe_array_shift_copy(dst, src, count, sh);
+    *exp_io = (int16_t)(*exp_io - sh);
 }

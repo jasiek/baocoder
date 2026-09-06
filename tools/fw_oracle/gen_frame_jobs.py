@@ -27,6 +27,8 @@ NORMBLK  = 0x00022C18
 PITCHHIST = 0x0001A9E8
 HILBERT  = 0x00029D1C
 SHIFTCPY = 0x0001AB58
+NORMARR  = 0x0001ADA0
+NEXP     = 0x00051A00
 ASRC     = 0x00051800
 ADST     = 0x00051900
 HSRC     = 0x00051600
@@ -239,6 +241,38 @@ def _shiftcopy_cases():
     return out
 
 
+def _normarr_cases():
+    """(count, exponent, 32 source values).
+
+    The peak is found with a true negation, so -0x8000 stays negative and
+    compares as SMALLER than everything - a block whose only extreme is -0x8000
+    is the case that separates a true negation from a saturating one.  An
+    all-zero block is the other one: it leaves the caller's exponent alone
+    rather than driving it anywhere.
+    """
+    out = []
+    def blk(f):
+        return [f(i) for i in range(32)]
+    for e in (0, 1, -1, 15, -15, 100):
+        out.append((32, e, blk(lambda i: 0)))
+        out.append((32, e, blk(lambda i: -0x8000)))
+        out.append((32, e, [(-0x8000 if i == 5 else 3) for i in range(32)]))
+        out.append((32, e, blk(lambda i: 1)))
+        out.append((32, e, blk(lambda i: 0x7FFF)))
+        out.append((32, e, blk(lambda i: (i * 997) % 0xFFFF - 0x8000)))
+        out.append((0, e, blk(lambda i: 5)))
+        out.append((1, e, blk(lambda i: 0x0100)))
+    x = 5309
+    for _ in range(200):
+        v = []
+        for _ in range(32):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(((x >> 7) & 0xFFFF) - 0x8000)
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append((1 + (x >> 7) % 32, ((x >> 3) % 41) - 20, v))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -276,6 +310,15 @@ def gen(jobfile):
         j.poke(ADST, b"\xEE" * (32 * 2))
         j.call(SHIFTCPY, ADST, ASRC, count & 0xFFFFFFFF, sh & 0xFFFFFFFF)
         j.peek("sc%d" % i, ADST, 32 * 2)
+    for i, (count, e, vals) in enumerate(_normarr_cases()):
+        j.poke(ASRC, struct.pack("<32h", *vals))
+        j.poke(ADST, b"\xEE" * (32 * 2))
+        j.poke(NEXP, struct.pack("<h", e))
+        j.call(NORMARR, ADST, ASRC, count & 0xFFFFFFFF, NEXP)
+        j.peek("na%d" % i, ADST, 32 * 2)
+        # NOT "ne2%d": that collides with the block normaliser's "ne%d" the
+        # moment either index reaches 20, and emu.parse keys peeks by name.
+        j.peek("nax%d" % i, NEXP, 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -379,6 +422,21 @@ def export(outfile, destdir):
             o = struct.unpack("<32h", res["peek"]["sc%d" % i][0])
             fh.write("%d %d %s %s\n" % (count, sh, " ".join(map(str, vals)),
                                          " ".join(map(str, o))))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_normarray.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Dsp_NormalizeArray 0x0001ADA0, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count exponentIn, 32 source values, then the 32\n"
+                 "# written and the exponent left behind.\n")
+        m = 0
+        for i, (count, e, vals) in enumerate(_normarr_cases()):
+            o = struct.unpack("<32h", res["peek"]["na%d" % i][0])
+            eo = struct.unpack("<h", res["peek"]["nax%d" % i][0])[0]
+            fh.write("%d %d %s %s %d\n" % (count, e, " ".join(map(str, vals)),
+                                            " ".join(map(str, o)), eo))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)

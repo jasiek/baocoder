@@ -16,6 +16,11 @@
    left when positive, arithmetic right when negative. */
 void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift);
 
+/* Dsp_NormalizeArray 0x0001ADA0: shift an array up by its headroom and take
+   the same amount off the exponent the caller carries. */
+void ambe_normalize_array(int16_t *dst, const int16_t *src, int count,
+                          int16_t *exp_io);
+
 /* Math_PopCountBits 0x000189F4: the population count of the low `n` bits. */
 int ambe_popcount_bits(uint32_t x, int n);
 
