@@ -21,6 +21,12 @@ void ambe_array_shift_copy(int16_t *dst, const int16_t *src, int n, int shift);
 void ambe_normalize_array(int16_t *dst, const int16_t *src, int count,
                           int16_t *exp_io);
 
+/* Math_ArrayShiftSaturate 0x0001AF5C: rescale an array between two block-float
+   exponents, saturating per element.  Not Math_ArrayShiftSaturateInt
+   0x0001AE14, which is ambe_synth_output. */
+void ambe_array_shift_saturate(int16_t *dst, const int16_t *src, int count,
+                               int16_t dst_exp, int16_t src_exp);
+
 /* Math_PopCountBits 0x000189F4: the population count of the low `n` bits. */
 int ambe_popcount_bits(uint32_t x, int n);
 

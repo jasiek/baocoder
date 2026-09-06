@@ -15,6 +15,7 @@
  *   Vocoder_UpdatePitchHistoryBuffer 0x0001A9E8 here
  *   Dsp_HilbertTransform      0x00029D1C   here
  *   Dsp_NormalizeArray        0x0001ADA0   here
+ *   Math_ArrayShiftSaturate   0x0001AF5C   here
  *
  * SPDX-License-Identifier: ISC
  */
@@ -411,6 +412,56 @@ int main(void)
         CHECK(aok == an, "Dsp_NormalizeArray exact on %d of %d\n", aok, an);
         printf("[Dsp_NormalizeArray %d/%d bit-exact, %d all-zero blocks and %d "
                "values at -0x8000] ", aok, an, zero, extreme);
+    }
+
+    {   /* Math_ArrayShiftSaturate: saturation is per element, against that
+           element's own headroom, so a block with one loud sample among quiet
+           ones separates this from a whole-array renormalisation */
+        FILE *g = fixture_open("frame_shiftsat.fw");
+        int qn = 0, qok = 0, sat = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            int16_t src[32], ref[32], got[32];
+            long count, de, se;
+            char *p = line;
+            int k, bad = 0;
+
+            if (line[0] == '#')
+                continue;
+            count = strtol(p, &p, 10);
+            de    = strtol(p, &p, 10);
+            se    = strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) src[k] = (int16_t)strtol(p, &p, 10);
+            for (k = 0; k < 32; k++) ref[k] = (int16_t)strtol(p, &p, 10);
+
+            for (k = 0; k < 32; k++)
+                got[k] = (int16_t)0xEEEE;
+            ambe_array_shift_saturate(got, src, (int)count, (int16_t)de,
+                                      (int16_t)se);
+            for (k = 0; k < 32; k++)
+                if (got[k] != ref[k]) {
+                    CHECK(0, "shiftsat case %d (count %ld %ld<-%ld) slot %d: "
+                             "%d, firmware %d\n", qn, count, de, se, k,
+                          (int)got[k], (int)ref[k]);
+                    bad = 1;
+                    break;
+                }
+            if (!bad)
+                qok++;
+            for (k = 0; k < count; k++)
+                if ((ref[k] == 0x7fff || ref[k] == -0x8000) && src[k] != ref[k])
+                    sat++;
+            qn++;
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(qn > 200, "only %d shift-saturate cases\n", qn);
+        CHECK(sat > 0, "nothing saturates, so the headroom check is untested\n");
+        CHECK(qok == qn, "Math_ArrayShiftSaturate exact on %d of %d\n", qok, qn);
+        printf("[Math_ArrayShiftSaturate %d/%d bit-exact, %d values saturated] ",
+               qok, qn, sat);
     }
 
     CHECK(n > 400, "only %d popcount cases\n", n);

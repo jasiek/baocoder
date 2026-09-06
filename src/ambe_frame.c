@@ -21,6 +21,7 @@
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   here
  *   Dsp_HilbertTransform               0x00029D1C   here
  *   Dsp_NormalizeArray                 0x0001ADA0   here
+ *   Math_ArrayShiftSaturate            0x0001AF5C   here
  *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
  *   Dsp_HilbertTransform               0x00029D1C   not yet
  *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
@@ -488,4 +489,46 @@ void ambe_normalize_array(int16_t *dst, const int16_t *src, int count,
     sh = (int16_t)(ambe_lzcount32(peak) - 1u);
     ambe_array_shift_copy(dst, src, count, sh);
     *exp_io = (int16_t)(*exp_io - sh);
+}
+
+/*
+ * Math_ArrayShiftSaturate 0x0001AF5C.
+ *
+ * Rescale an array from one block-float exponent to another, saturating rather
+ * than wrapping when the new exponent cannot hold it.  Not the same function as
+ * Math_ArrayShiftSaturateInt 0x0001AE14, which is the final scaling to int16
+ * PCM and lives in ambe_postfilter.c as ambe_synth_output.
+ *
+ * Shifting DOWN never saturates and is not even checked: the value is shifted
+ * arithmetically and the low 16 bits taken.  Shifting UP is checked per element
+ * against that element's own headroom, so one loud sample saturates alone
+ * rather than forcing the whole array down - which is the difference between
+ * this and simply renormalising.
+ *
+ * A zero element short-circuits to zero without going through either path,
+ * which matters because the headroom of zero would otherwise be 31 and let it
+ * through any shift at all.
+ */
+void ambe_array_shift_saturate(int16_t *dst, const int16_t *src, int count,
+                               int16_t dst_exp, int16_t src_exp)
+{
+    int sh = (int16_t)(dst_exp - src_exp);
+    int i;
+
+    for (i = 0; i < count; i++) {
+        uint32_t v = (uint32_t)(uint16_t)src[i] << 16;
+
+        if ((uint16_t)src[i] == 0) {
+            dst[i] = 0;
+        } else if (sh < 0) {
+            dst[i] = (int16_t)((uint32_t)ambe_asr_hw((int32_t)v, -sh) >> 16);
+        } else {
+            uint32_t m = ((int32_t)v < 0) ? ~v : v;
+
+            if ((int)(int16_t)((int16_t)ambe_lzcount32(m) - 1) < sh)
+                dst[i] = (v & 0x80000000u) ? (int16_t)0x8000 : (int16_t)0x7fff;
+            else
+                dst[i] = (int16_t)((uint32_t)ambe_lsl_hw((int32_t)v, sh) >> 16);
+        }
+    }
 }

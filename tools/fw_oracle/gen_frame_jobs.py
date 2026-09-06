@@ -28,6 +28,7 @@ PITCHHIST = 0x0001A9E8
 HILBERT  = 0x00029D1C
 SHIFTCPY = 0x0001AB58
 NORMARR  = 0x0001ADA0
+SHIFTSAT = 0x0001AF5C
 NEXP     = 0x00051A00
 ASRC     = 0x00051800
 ADST     = 0x00051900
@@ -273,6 +274,40 @@ def _normarr_cases():
     return out
 
 
+def _shiftsat_cases():
+    """(count, dstExp, srcExp, 32 source values).
+
+    Saturation is checked per element against that element's own headroom, so a
+    block with one loud sample among quiet ones is the case that separates this
+    from a whole-array renormalisation.  Zero short-circuits, which matters
+    because the headroom of zero is 31 and would otherwise pass any shift.
+    """
+    out = []
+    def blk(f):
+        return [f(i) for i in range(32)]
+    loud = [1] * 32
+    loud[7] = 0x7FFF
+    loud[19] = -0x8000
+    for de, se in ((0, 0), (4, 0), (0, 4), (15, 0), (0, 15), (1, 0), (0, 1),
+                   (31, 0), (0, 31), (-4, 4), (4, -4)):
+        out.append((32, de, se, blk(lambda i: 0)))
+        out.append((32, de, se, list(loud)))
+        out.append((32, de, se, blk(lambda i: 0x7FFF)))
+        out.append((32, de, se, blk(lambda i: -0x8000)))
+        out.append((32, de, se, blk(lambda i: (i * 811) % 0xFFFF - 0x8000)))
+        out.append((1, de, se, list(loud)))
+    x = 24601
+    for _ in range(200):
+        v = []
+        for _ in range(32):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(((x >> 7) & 0xFFFF) - 0x8000)
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append((1 + (x >> 7) % 32, ((x >> 3) % 41) - 20,
+                    ((x >> 11) % 41) - 20, v))
+    return out
+
+
 def gen(jobfile):
     j = emu.Job()
     for v, n in _popcount_cases():
@@ -319,6 +354,12 @@ def gen(jobfile):
         # NOT "ne2%d": that collides with the block normaliser's "ne%d" the
         # moment either index reaches 20, and emu.parse keys peeks by name.
         j.peek("nax%d" % i, NEXP, 2)
+    for i, (count, de, se, vals) in enumerate(_shiftsat_cases()):
+        j.poke(ASRC, struct.pack("<32h", *vals))
+        j.poke(ADST, b"\xEE" * (32 * 2))
+        j.call(SHIFTSAT, ADST, ASRC, count & 0xFFFFFFFF, de & 0xFFFFFFFF,
+               se & 0xFFFFFFFF)
+        j.peek("ss%d" % i, ADST, 32 * 2)
     j.write(jobfile)
     print("wrote %s: %d popcount, %d smoother cases"
           % (jobfile, len(_popcount_cases()), len(_smooth_cases())))
@@ -437,6 +478,21 @@ def export(outfile, destdir):
             eo = struct.unpack("<h", res["peek"]["nax%d" % i][0])[0]
             fh.write("%d %d %s %s %d\n" % (count, e, " ".join(map(str, vals)),
                                             " ".join(map(str, o)), eo))
+            m += 1
+    print("%s: %d cases" % (dest, m))
+
+    dest = os.path.join(destdir, "frame_shiftsat.fw")
+    with open(dest, "w") as fh:
+        fh.write("# Math_ArrayShiftSaturate 0x0001AF5C, executed under the p-code\n"
+                 "# emulator.  tools/fw_oracle/gen_frame_jobs.py.\n"
+                 "# per record: count dstExp srcExp, 32 source values, then the 32\n"
+                 "# written.\n")
+        m = 0
+        for i, (count, de, se, vals) in enumerate(_shiftsat_cases()):
+            o = struct.unpack("<32h", res["peek"]["ss%d" % i][0])
+            fh.write("%d %d %d %s %s\n" % (count, de, se,
+                                            " ".join(map(str, vals)),
+                                            " ".join(map(str, o))))
             m += 1
     print("%s: %d cases" % (dest, m))
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
