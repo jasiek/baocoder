@@ -96,6 +96,8 @@ PREV          = V.TX_CTX + 0x470   # param_5, the previous frame's parameters:
 VOI           = 0x00057D00
 N_VOI         = 0x38               # shorts per array
 VOI_LEN       = N_VOI * 2 * 2      # both arrays
+CTX_LEN       = 0x800              # the whole of g_VocoderTxCtx that the
+                                   # synthesis path touches
 
 
 def gen(jobfile, framesfile, nframes):
@@ -136,6 +138,13 @@ def gen(jobfile, framesfile, nframes):
         j.peek("vst%d" % w, V_STATE, N_VST * 2)
         j.peek("prv%d" % w, PREV, BLK_LEN)
         j.peek("voi%d" % w, VOI, VOI_LEN)
+        # The WHOLE channel context, which is what a replay of
+        # Vocoder_SynthesizeFrame 0x00019DB8 itself needs: it reads ctx+0x18,
+        # +0x172, +0x470, +0x4f8, +0x648, +0x7ba and +0x7be, and the peeks above
+        # cover all but two of those.  Rather than add the two and discover a
+        # third later, take the lot - it subsumes every one of them, and the
+        # cost is output-file size in a scratch run.
+        j.peek("ctx%d" % w, V.TX_CTX, CTX_LEN)
     j.write(jobfile)
     print("wrote %s: %d stops" % (jobfile, nframes * D.WAKES_PER_FRAME * 6))
 

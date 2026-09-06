@@ -14,7 +14,7 @@ CFLAGS  ?= -O2 -g -std=c99 -Wall -Wextra -Wno-unused-parameter
 CPPFLAGS += -Iinclude -Isrc -D_DEFAULT_SOURCE
 LDLIBS  += -lm
 
-SRC     := src/golay.c src/ambe_basop.c src/ambe_fft.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c src/ambe_blend.c src/ambe_postfilter.c src/ambe_unvoiced.c src/ambe_voiced.c \
+SRC     := src/golay.c src/ambe_basop.c src/ambe_fft.c src/ambe_encode_params.c src/ambe_fec.c src/ambe_params.c src/ambe_synth.c src/ambe_blend.c src/ambe_postfilter.c src/ambe_unvoiced.c src/ambe_voiced.c src/ambe_frame.c \
            src/ambe_tables_fw.c src/ambe_decoder.c src/ambe_analysis.c src/ambe_subband.c src/ambe_encoder.c src/rc4.c src/aes.c
 OBJ     := $(SRC:.c=.o)
 LIB     := libbaocoder.a

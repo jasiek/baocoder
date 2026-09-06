@@ -297,20 +297,6 @@ int ambe_sin_q15(int phase_q15turns)
  * so the smaller operand can be shifted by exactly 32 - which C leaves
  * undefined and the machine renders as "everything shifted out".
  */
-static int32_t asr_hw(int32_t v, int n)
-{
-    n &= 0x3f;
-    if (n >= 32)
-        return v < 0 ? -1 : 0;
-    return v >> n;
-}
-
-static int32_t lsl_hw(int32_t v, int n)
-{
-    n &= 0x3f;
-    return n >= 32 ? 0 : ambe_shl32(v, n);
-}
-
 /* ff1 on the value the stock code hands it: the operand is complemented first
    when negative, at 0x00018E54 and 0x00018F82, so a normalising shift keeps the
    sign bit and the bit below it distinct. */
@@ -350,14 +336,14 @@ uint16_t ambe_float_add(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
     }
 
     e = (exp_b < exp_a ? exp_a : exp_b) + 1;      /* 0x00018E04 / 0x00018E48 */
-    sum = asr_hw((int32_t)(b << 16), e - exp_b)
-        + asr_hw((int32_t)(a << 16), e - exp_a);
+    sum = ambe_asr_hw((int32_t)(b << 16), e - exp_b)
+        + ambe_asr_hw((int32_t)(a << 16), e - exp_a);
     if (sum == 0) {                               /* 0x00018E1C */
         *exp_out = 0;
         return 0;
     }
     sh = norm_shift(sum);
-    r = (uint32_t)lsl_hw(sum, sh) >> 16;
+    r = (uint32_t)ambe_lsl_hw(sum, sh) >> 16;
     if (r == 0) {                                 /* 0x00018E32 */
         *exp_out = 0;
         return 0;
@@ -409,7 +395,7 @@ uint16_t ambe_float_div_exp(int32_t mant_a, int exp_a, int32_t mant_b,
     if (q != 0) {
         int32_t v = (int32_t)(q << 16);                  /* 0x00018F20 */
         sh = norm_shift(v);
-        q = (uint32_t)lsl_hw(v, sh) >> 16;
+        q = (uint32_t)ambe_lsl_hw(v, sh) >> 16;
         if (q != 0) {
             *exp_out = (int16_t)(exp_a - exp_b - sh);
             return (uint16_t)q;
@@ -450,14 +436,14 @@ uint16_t ambe_float_sub(int32_t mant_a, int exp_a, int32_t mant_b, int exp_b,
     }
 
     e = (exp_b < exp_a ? exp_a : exp_b) + 1;
-    sum = asr_hw((int32_t)(b << 16), e - exp_b)
-        - asr_hw((int32_t)(a << 16), e - exp_a);
+    sum = ambe_asr_hw((int32_t)(b << 16), e - exp_b)
+        - ambe_asr_hw((int32_t)(a << 16), e - exp_a);
     if (sum == 0) {
         *exp_out = 0;
         return 0;
     }
     sh = norm_shift(sum);
-    r = (uint32_t)lsl_hw(sum, sh) >> 16;
+    r = (uint32_t)ambe_lsl_hw(sum, sh) >> 16;
     if (r == 0) {
         *exp_out = 0;
         return 0;
@@ -495,7 +481,7 @@ uint32_t ambe_float_sqrt(int32_t mant, int16_t *exp)
         return 0;
 
     sh   = (int16_t)(uint16_t)(ambe_lzcount32((uint32_t)mant) - 1);
-    norm = (int32_t)((uint32_t)lsl_hw(mant, sh) >> 16);   /* lsri: logical */
+    norm = (int32_t)((uint32_t)ambe_lsl_hw(mant, sh) >> 16);   /* lsri: logical */
     e    = (int32_t)((uint32_t)((int32_t)*exp - sh) & 0xFFFF);   /* zexth r2 */
 
     /* two Horner stages, each rounded by 0x8000 before its shift */

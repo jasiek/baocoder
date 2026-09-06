@@ -50,6 +50,7 @@ FADD = 0x00018DD8
 FDIV = 0x00018EF4
 FSUB = 0x00018E5C
 SQRT = 0x00019364
+SQSC = 0x000193E0
 EXP  = 0x00051000          # the short they write through their last argument
 
 
@@ -105,6 +106,29 @@ def _sqrt_cases():
     return out
 
 
+def _sqrt_scaled_cases():
+    """(mantissa, exponent, qFormat) for Math_SqrtScaled 0x000193E0.
+
+    Math_Sqrt's polynomial with the answer shifted into a caller-chosen Q format
+    rather than left as a pair, and a separate entry point rather than a wrapper:
+    it rounds by 0x8000 into the high half at every step including the final
+    scaling.  Vocoder_NormalizeSpectralBlock and Vocoder_SynthesizeFrame both
+    call it, so it is swept before either is written.
+    """
+    out = [(0, 0, 0), (1, 0, 0), (0x7FFFFFFF, 0, 0), (0x40000000, 1, 15),
+           (0x40000000, 2, 15), (-1, 0, 0), (-0x40000000, 0, 0),
+           (0x10000, 15, 15), (0x10000, 16, 0), (0x10000, 15, 31),
+           (0x10000, 15, -31)]
+    x = 97531
+    for _ in range(700):
+        v = []
+        for _ in range(3):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            v.append(x)
+        out.append(((v[0] << 1) & 0xFFFFFFFF, (v[1] % 61) - 30, (v[2] % 41) - 20))
+    return out
+
+
 def gen(jobfile):
     cases = _cases()
     j = emu.Job()
@@ -134,6 +158,9 @@ def gen(jobfile):
         j.call(SQRT, m & 0xFFFFFFFF, EXP)
         j.getreg("r0")
         j.peek("qe%d" % i, EXP, 2)
+    for i, (m, e, q) in enumerate(_sqrt_scaled_cases()):
+        j.call(SQSC, m & 0xFFFFFFFF, e & 0xFFFFFFFF, q & 0xFFFFFFFF)
+        j.getreg("r0")
     j.write(jobfile)
     print("wrote %s: %d add/divide cases, %d square roots"
           % (jobfile, len(cases), len(_sqrt_cases())))
@@ -180,6 +207,14 @@ def export(outfile, dest):
             seen.append(1)
             fh.write("%d %d %u %d\n" % (m - (1 << 32) if m >= (1 << 31) else m,
                                          e, sm, sx))
+    with open(dest.replace("float", "sqrtscaled"), "w") as fh:
+        fh.write("# Math_SqrtScaled 0x000193E0, executed under the p-code emulator.\n"
+                 "# tools/fw_oracle/gen_basop_jobs.py.\n"
+                 "# per record: mantissa exponent qFormat, then the value returned.\n")
+        for (m, e, q) in _sqrt_scaled_cases():
+            fh.write("%d %d %d %u\n"
+                     % (m - (1 << 32) if m >= (1 << 31) else m, e, q, r0[k]))
+            k += 1
     assert k == len(r0), "%d register reads, %d consumed" % (len(r0), k)
     print("%s: %d cases, %s: %d square roots"
           % (dest, n, dest.replace("float", "sqrt"), len(seen)))

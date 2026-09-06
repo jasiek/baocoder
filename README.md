@@ -293,12 +293,32 @@ is in the decode path, because the stage that would call them is not written.
   well — 1 584, 417 and 900 cases — and so are the four fixed-point primitives
   under them.
 
-  What remains is plumbing rather than arithmetic. `ambe_decode_bits` still
-  calls `ambe_synthesize` — `src/ambe_synth.c`, mbelib's time-domain sum of
-  sinusoids under a generated trapezoid — so `test_synth` still compares spectra
-  and levels rather than samples, at 0.973 mean band correlation. Rewiring the
-  decode path onto `ambe_voiced_synth`, the blend, the unvoiced synthesiser and
-  the output filter is what turns four exact stages into an exact decoder.
+  What remains is **not** plumbing, which an earlier version of this paragraph
+  claimed. The four exact stages cannot simply be called in order, because the
+  parameter block they consume is not the one the decoder produces:
+  `Vocoder_SynthesizeFrame 0x00019DB8` rewrites it on the way down —
+  normalisation, the excitation match, the voicing flags, the gain ramp — and
+  only then calls the unvoiced synthesiser, the voiced one, the output filter
+  and the scaling. Wiring the decode path means transcribing that function and
+  the six of its callees this library does not yet have:
+
+  | | lines |
+  |---|--:|
+  | `Math_Pow2Scaled` `0x00019280` | 40 |
+  | `Vocoder_SmoothPitchState` `0x00022D7C` | 19 |
+  | `Vocoder_NormalizeSpectralBlock` `0x00022C18` | 61 |
+  | `Vocoder_UpdatePitchHistoryBuffer` `0x0001A9E8` | 83 |
+  | `Dsp_HilbertTransform` `0x00029D1C` | 110 |
+  | `Vocoder_MatchExcitationEnergy` `0x000277F8` | 335 |
+  | `Vocoder_SynthesizeFrame` `0x00019DB8` | 296 |
+
+  plus the two `Tone_*` classifiers, which only tone frames reach.
+  `src/ambe_frame.c` is that layer and holds the first three of them —
+  `Math_SqrtScaled` `0x000193E0` (711 of 711 swept),
+  `Vocoder_CopyFrameParamsWithReset` `0x00019CBC` and
+  `Vocoder_ResetFrameBuffer` `0x00019D38`. Until the rest exist,
+  `ambe_decode_bits` still calls `ambe_synthesize` and `test_synth` still
+  compares spectra at 0.973 rather than samples.
 * **`Vocoder_ResampleSpectralEnvelope 0x00026A84` is implemented and exact, but
   unwired** — `src/ambe_blend.c`, bit-exact on pitch, `L` and envelope over
   **232 firmware calls** (`test_blend`). So are `Vocoder_SynthesizeUnvoiced`

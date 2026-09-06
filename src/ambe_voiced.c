@@ -53,20 +53,6 @@ static int16_t nhi(int32_t v, int sh)
 /* The shift amounts the machine masks to six bits, as in ambe_basop.c.  The
    clamp below scales by an exponent difference that is not bounded by anything,
    so both directions can exceed 31. */
-static int32_t asr_hw(int32_t v, int n)
-{
-    n &= 0x3f;
-    if (n >= 32)
-        return v < 0 ? -1 : 0;
-    return v >> n;
-}
-
-static int32_t lsl_hw(int32_t v, int n)
-{
-    n &= 0x3f;
-    return n >= 32 ? 0 : ambe_shl32(v, n);
-}
-
 /*
  * Vocoder_ComputeHarmonicGains 0x0001D71C, whole.
  *
@@ -180,7 +166,7 @@ void ambe_voiced_harmonic_gains(uint16_t *gain, uint16_t *index, int32_t phase,
         /* the clamp: the gain may not exceed the sample count */
         sh = (int16_t)(e1 - 15);
         scaled = (int32_t)((uint32_t)g << 16);
-        scaled = sh < 0 ? asr_hw(scaled, -sh) : lsl_hw(scaled, sh);
+        scaled = sh < 0 ? ambe_asr_hw(scaled, -sh) : ambe_lsl_hw(scaled, sh);
         /* `addu` on the machine: the scaled gain can overflow into the sign
            bit - a mantissa of 0x401B shifted up by one does - and the
            comparison is made on the wrapped result, which is what puts these
@@ -308,8 +294,8 @@ lookup:
             dest[bin * 2]     = (int16_t)((uint32_t)(re >> (shift & 0x3f)) >> 16);
             dest[bin * 2 + 1] = (int16_t)((uint32_t)(im >> (shift & 0x3f)) >> 16);
         } else {
-            dest[bin * 2]     = (int16_t)((uint32_t)lsl_hw(re, -shift) >> 16);
-            dest[bin * 2 + 1] = (int16_t)((uint32_t)lsl_hw(im, -shift) >> 16);
+            dest[bin * 2]     = (int16_t)((uint32_t)ambe_lsl_hw(re, -shift) >> 16);
+            dest[bin * 2 + 1] = (int16_t)((uint32_t)ambe_lsl_hw(im, -shift) >> 16);
         }
         written++;
     }
@@ -403,8 +389,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
 
     /* where this harmonic starts, rounded up to the next whole sample */
     sh = (int16_t)(exp - 0xf);
-    scaled = sh < 0 ? asr_hw(ambe_shl32(mant, 16), -sh)
-                    : lsl_hw(ambe_shl32(mant, 16), sh);
+    scaled = sh < 0 ? ambe_asr_hw(ambe_shl32(mant, 16), -sh)
+                    : ambe_lsl_hw(ambe_shl32(mant, 16), sh);
     first = (uint32_t)scaled + 0xffff;
     start_i = (int16_t)(first >> 16);
 
@@ -421,8 +407,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
         q = ambe_float_add(mant, exp, q, e1, &e2);
 
         sh = (int16_t)(e2 - 0xf);
-        v = (uint32_t)(sh < 0 ? asr_hw(ambe_shl32((int32_t)(uint32_t)q, 16), -sh)
-                              : lsl_hw(ambe_shl32((int32_t)(uint32_t)q, 16), sh));
+        v = (uint32_t)(sh < 0 ? ambe_asr_hw(ambe_shl32((int32_t)(uint32_t)q, 16), -sh)
+                              : ambe_lsl_hw(ambe_shl32((int32_t)(uint32_t)q, 16), sh));
         end_i = (int16_t)(v >> 16);
         if (end_i > 0xa6) {
             end_i = 0xa6;
@@ -436,7 +422,7 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
             limit = 0xa7;
         }
         /* the falling window's phase, and the flat section's end */
-        win_dn = (asr_hw((int32_t)((v - (uint32_t)ambe_shl32((int32_t)(v >> 16), 16)) * 0x8000), 15)
+        win_dn = (ambe_asr_hw((int32_t)((v - (uint32_t)ambe_shl32((int32_t)(v >> 16), 16)) * 0x8000), 15)
                   & (int32_t)0xfffffffe) + 0xf0000;
         endp1 = (uint32_t)((uint16_t)end_i + 1);
     }
@@ -444,8 +430,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
     {   /* the fractional part of the start drives both accumulators */
         uint32_t frac = ((uint32_t)(ambe_shl32(start_i, 16) - scaled) & 0x1ffff) >> 1;
 
-        win_up = asr_hw(ambe_shl32((int32_t)frac, 16), 15);
-        pos    = asr_hw((int32_t)(int16_t)pitch * (int32_t)(int16_t)frac * 2, 11);
+        win_up = ambe_asr_hw(ambe_shl32((int32_t)frac, 16), 15);
+        pos    = ambe_asr_hw((int32_t)(int16_t)pitch * (int32_t)(int16_t)frac * 2, 11);
     }
 
     if (start_i < 0) {
@@ -470,8 +456,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
     if (count > 0) {
         cursor = (cursor + nrise) & 0xffff;
         for (i = 0; i < count; i++) {
-            outp[i] += e < 0 ? asr_hw(win_sample(block, pos, win_up), -e)
-                             : lsl_hw(win_sample(block, pos, win_up), e);
+            outp[i] += e < 0 ? ambe_asr_hw(win_sample(block, pos, win_up), -e)
+                             : ambe_lsl_hw(win_sample(block, pos, win_up), e);
             win_up += 0x10000;
             pos    += step;
         }
@@ -490,8 +476,8 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
 
             cursor += (uint32_t)nflat;
             for (i = 0; i <= (int)n; i++) {
-                outp[i] += e < 0 ? asr_hw(flat_sample(block, pos), -e)
-                                 : lsl_hw(flat_sample(block, pos), e);
+                outp[i] += e < 0 ? ambe_asr_hw(flat_sample(block, pos), -e)
+                                 : ambe_lsl_hw(flat_sample(block, pos), e);
                 pos += step;
             }
             outp += n + 1;
@@ -507,7 +493,7 @@ void ambe_voiced_interp_envelope(int32_t *env, int32_t mant, int16_t exp,
 
             pos    += step;
             win_dn -= 0x10000;
-            outp[i] += e < 0 ? asr_hw(v, -e) : lsl_hw(v, e);
+            outp[i] += e < 0 ? ambe_asr_hw(v, -e) : ambe_lsl_hw(v, e);
         }
     }
 }
@@ -532,7 +518,7 @@ static void wr32(int16_t *p, int32_t v)
 static int32_t renorm(int32_t v)
 {
     int sh = nsh(v);
-    return asr_hw(ambe_shl32(v, sh), sh);
+    return ambe_asr_hw(ambe_shl32(v, sh), sh);
 }
 
 /*
@@ -608,16 +594,16 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
             dbl = 1;
         }
         delta = (int32_t)((uint32_t)(p_cur * 0x10000) - (uint32_t)(p_prev * 0x10000)) >> 16;
-        advance = asr_hw(nn * (int32_t)(int16_t)((uint32_t)(
+        advance = ambe_asr_hw(nn * (int32_t)(int16_t)((uint32_t)(
                       (ambe_shl32(p_cur * 0x10000, 0) >> 1)
                     + (ambe_shl32(p_prev * 0x10000, 0) >> 1)) >> 16) * 2, 4) + phase;
         advance = renorm(advance);
         count = (int16_t)((uint32_t)advance >> 16);
     } else if (prev_v) {
-        advance = renorm(asr_hw(sm_prev * nn * 2, 4) + phase);
+        advance = renorm(ambe_asr_hw(sm_prev * nn * 2, 4) + phase);
         count = (int16_t)((uint32_t)advance >> 16);
     } else if (cur_v) {
-        advance = renorm(asr_hw((int32_t)cur[6] * nn * 2, 4) + phase);
+        advance = renorm(ambe_asr_hw((int32_t)cur[6] * nn * 2, 4) + phase);
         count = (int16_t)((uint32_t)advance >> 16);
         p_prev  = p_cur;              /* this frame's pitch becomes the history */
         sm_prev = cur[6];
@@ -652,7 +638,7 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
             acc[i] = (int32_t)((uint32_t)(buf[i] + acc[i]) - t);
             if (i + 1 == lim)
                 break;
-            ramp += inv_e < 0 ? asr_hw(step, -inv_e) : lsl_hw(step, inv_e);
+            ramp += inv_e < 0 ? ambe_asr_hw(step, -inv_e) : ambe_lsl_hw(step, inv_e);
         }
     }
 
@@ -682,11 +668,11 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
         }
         {
             int16_t oe;
-            uint16_t q = ambe_float_div_exp(lsl_hw(ambe_shl32(pitch, 16), sh),
+            uint16_t q = ambe_float_div_exp(ambe_lsl_hw(ambe_shl32(pitch, 16), sh),
                                             ea, (uint16_t)sm, eb, &oe);
             int s2 = (int16_t)(oe - 0xf);
-            start = s2 < 0 ? asr_hw(ambe_shl32((int32_t)(int16_t)q, 16), -s2)
-                           : lsl_hw(ambe_shl32((int32_t)(int16_t)q, 16), s2);
+            start = s2 < 0 ? ambe_asr_hw(ambe_shl32((int32_t)(int16_t)q, 16), -s2)
+                           : ambe_lsl_hw(ambe_shl32((int32_t)(int16_t)q, 16), s2);
         }
 
         if (ambe_voiced_harmonic_spectrum((int32_t *)(st + 0xe6), st + 0xe5, step,
@@ -695,7 +681,7 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
                                           cur[2],
                                           (int16_t)((uint32_t)(start + 0x8000) >> 16),
                                           2) != 0) {
-            uint32_t g = (uint32_t)((asr_hw(ambe_shl32((int32_t)(uint16_t)cur[7], 16), 8)
+            uint32_t g = (uint32_t)((ambe_asr_hw(ambe_shl32((int32_t)(uint16_t)cur[7], 16), 8)
                                      - 0x100000) + (int32_t)n_hi);
             int16_t ge;
 
@@ -740,7 +726,7 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
                 {
                     int16_t oe;
                     st[0xaa] = (int16_t)ambe_float_div_exp(
-                        lsl_hw(rem, sa), 0xf - sa,
+                        ambe_lsl_hw(rem, sa), 0xf - sa,
                         (uint16_t)nhi((int32_t)pp, sb), (int16_t)(-4 - sb), &oe);
                     st[0xab] = oe;
                 }
@@ -814,7 +800,7 @@ void ambe_voiced_synth(int32_t *acc, uint16_t n, int16_t *st,
             acc[i] = (int32_t)((uint32_t)acc[i] + t);
             if (i + 1 == lim)
                 break;
-            ramp += inv_e < 0 ? asr_hw(step, -inv_e) : lsl_hw(step, inv_e);
+            ramp += inv_e < 0 ? ambe_asr_hw(step, -inv_e) : ambe_lsl_hw(step, inv_e);
         }
     }
 

@@ -30,6 +30,7 @@
  */
 #include "ambe.h"
 #include "ambe_basop.h"
+#include "ambe_frame_int.h"
 #include "testutil.h"
 
 int main(void)
@@ -94,6 +95,8 @@ int main(void)
         n++;
     }
     free(line);
+    line = NULL;
+    cap = 0;            /* getline reuses both, and the blocks below call it */
     fclose(f);
 
     {   /* Math_Sqrt, and the demonstration that ambe_sqrt is a different
@@ -127,6 +130,9 @@ int main(void)
                     agree++;
             }
         }
+        free(line);
+        line = NULL;
+        cap = 0;
         fclose(g);
         CHECK(sn > 500, "only %d square roots in the fixture\n", sn);
         CHECK(sok == sn, "Math_Sqrt exact on %d of %d\n", sok, sn);
@@ -138,6 +144,38 @@ int main(void)
               "something has changed underneath both\n", agree, sn);
         printf("[Math_Sqrt %d/%d bit-exact, ambe_sqrt %d/%d - a different "
                "function, deliberately] ", sok, sn, agree, sn);
+    }
+
+    {   /* Math_SqrtScaled, which Vocoder_NormalizeSpectralBlock and
+           Vocoder_SynthesizeFrame both call - swept before either is written */
+        FILE *g = fixture_open("basop_sqrtscaled.fw");
+        int qn = 0, qok = 0;
+
+        while (getline(&line, &cap, g) > 0) {
+            long m, e, q;
+            unsigned long r;
+            char *p = line;
+            uint32_t got;
+
+            if (line[0] == '#')
+                continue;
+            m = strtol(p, &p, 10); e = strtol(p, &p, 10);
+            q = strtol(p, &p, 10); r = strtoul(p, &p, 10);
+            got = ambe_sqrt_scaled((int32_t)m, (uint32_t)e, (int16_t)q);
+            qn++;
+            if (got == (uint32_t)r)
+                qok++;
+            else
+                CHECK(0, "sqrt_scaled(%ld,%ld,%ld) = %u, firmware %lu\n",
+                      m, e, q, (unsigned)got, r);
+        }
+        free(line);
+        line = NULL;
+        cap = 0;
+        fclose(g);
+        CHECK(qn > 600, "only %d scaled square roots\n", qn);
+        CHECK(qok == qn, "Math_SqrtScaled exact on %d of %d\n", qok, qn);
+        printf("[Math_SqrtScaled %d/%d bit-exact] ", qok, qn);
     }
 
     CHECK(n > 3000, "only %d cases in the fixture\n", n);

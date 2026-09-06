@@ -40,6 +40,32 @@ static inline int64_t ambe_shl64(int64_t v, int n)
 }
 
 /*
+ * `asr` and `lsl` with the shift amount the hardware actually applies.
+ *
+ * The C-SKY shift instructions take their amount from a register and mask it to
+ * six bits, which is visible all over the decompilation as `<< (n & 0x3f)`.
+ * That is not academic: Math_FloatAdd aligns to max(expA, expB) + 1 and its own
+ * guard admits a difference of 31, so the smaller operand can be shifted by
+ * exactly 32 - undefined in C, and on the machine everything shifted out.
+ * Transcribing it as a plain `>>`, which on this host compiles to a shift masked
+ * to FIVE bits and so shifts by nothing, disagrees with the radio on 257 of the
+ * 3377 cases tests/test_basop_firmware.c sweeps.
+ */
+static inline int32_t ambe_asr_hw(int32_t v, int n)
+{
+    n &= 0x3f;
+    if (n >= 32)
+        return v < 0 ? -1 : 0;
+    return v >> n;
+}
+
+static inline int32_t ambe_lsl_hw(int32_t v, int n)
+{
+    n &= 0x3f;
+    return n >= 32 ? 0 : ambe_shl32(v, n);
+}
+
+/*
  * Signed divide, Math_SDiv 0x00018D74.  Returns 0 when |a| < |b| rather than
  * rounding, saturates the two extreme operands, and carries the sign through
  * an XOR of the inputs.

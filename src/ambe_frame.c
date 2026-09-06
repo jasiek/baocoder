@@ -1,0 +1,142 @@
+/*
+ * ambe_frame.c - Vocoder_SynthesizeFrame 0x00019DB8 and the helpers it drives.
+ *
+ * The layer between the decoded parameters and the two synthesisers.  It is
+ * what stands between src/ambe_voiced.c being exact and the decode path being
+ * able to use it: the parameter block the synthesisers consume is not the block
+ * the decoder produces, it is one this function rewrites on the way down -
+ * normalisation, the excitation match, the voicing flags, the gain ramp - and
+ * then hands to Vocoder_SynthesizeUnvoiced, Vocoder_SynthesizeVoiced, the
+ * output filter and the final scaling in that order.
+ *
+ * Being written leaves-first like the voiced synthesiser was:
+ *
+ *   Math_SqrtScaled                    0x000193E0   here
+ *   Vocoder_CopyFrameParamsWithReset   0x00019CBC   here
+ *   Vocoder_ResetFrameBuffer           0x00019D38   here
+ *   Vocoder_NormalizeSpectralBlock     0x00022C18   not yet
+ *   Dsp_HilbertTransform               0x00029D1C   not yet
+ *   Vocoder_UpdatePitchHistoryBuffer   0x0001A9E8   not yet
+ *   Vocoder_SynthesizeFrame            0x00019DB8   not yet
+ *
+ * SPDX-License-Identifier: ISC
+ */
+#include <string.h>
+
+#include "ambe.h"
+#include "ambe_basop.h"
+#include "ambe_tables.h"
+#include "ambe_frame_int.h"
+
+/*
+ * Math_SqrtScaled 0x000193E0.
+ *
+ * Math_Sqrt's polynomial over the same four coefficients at SRAM 0x18001618,
+ * with the answer shifted into a caller-chosen Q format instead of being left
+ * as a (mantissa, exponent) pair.  It is a separate entry point in the stock
+ * code rather than a wrapper, and the difference is visible: this one rounds by
+ * 0x8000 into the high half at every step INCLUDING the final scaling, where
+ * Math_Sqrt stops at the pair.
+ *
+ * A zero mantissa returns the exponent scaled with a zero value rather than
+ * short-circuiting, which is why the tail runs unconditionally.
+ */
+uint32_t ambe_sqrt_scaled(int32_t mant, uint32_t exp, int16_t q)
+{
+    int16_t e = (int16_t)exp;
+    uint32_t v = 0, acc;
+    int sh;
+
+    if (mant != 0) {
+        uint32_t d = (exp & 0xFFFF) - ((ambe_lzcount32((uint32_t)mant) - 1u) & 0xFFFF);
+        int16_t m;
+
+        sh = (int16_t)(ambe_lzcount32((uint32_t)mant) - 1u);
+        m  = (int16_t)((uint32_t)ambe_lsl_hw(mant, sh) >> 16);
+
+        acc = (uint32_t)((int32_t)((uint32_t)(uint16_t)ambe_sqrt_coeff_q15[2] << 16)
+                         + 0x8000
+                         + (int32_t)m * (int32_t)(int16_t)(
+                             (uint32_t)((int32_t)((uint32_t)(uint16_t)ambe_sqrt_coeff_q15[1] << 16)
+                                        + 0x8000
+                                        + (int32_t)m * (int32_t)ambe_sqrt_coeff_q15[0] * 2) >> 16)
+                           * 2);
+        v = acc & 0xFFFF0000u;
+        if ((d & 1) != 0)                        /* the odd-exponent correction */
+            v = (uint32_t)((int32_t)ambe_sqrt_coeff_q15[3]
+                           * (int32_t)(int16_t)(acc >> 16) * 2);
+        v = (v + 0x8000) & 0xFFFF0000u;
+        e = (int16_t)((((int32_t)(int16_t)d + 1) & 0x1ffff) >> 1);
+    }
+    sh = (int16_t)(e - q);
+    return sh >= 0 ? (uint32_t)(ambe_lsl_hw((int32_t)v, sh) + 0x8000) >> 16
+                   : (uint32_t)(ambe_asr_hw((int32_t)v, -sh) + 0x8000) >> 16;
+}
+
+/*
+ * Vocoder_CopyFrameParamsWithReset 0x00019CBC.
+ *
+ * A field-by-field copy of the 68-short parameter block, plus the 0x38-short
+ * amplitude tail, with one deliberate omission: the pointer at [0x40..0x41] is
+ * zeroed rather than copied.  That pointer is the destination's own voicing-flag
+ * array and copying it would leave two blocks sharing one, which is why the
+ * stock code spells the copy out instead of memcpy-ing 68 shorts.
+ *
+ * Fields 0..7, 0x42 and the tail; [0x41] and everything from [0x43] up are not
+ * copied at all.
+ */
+void ambe_frame_params_copy(int16_t *dst, const int16_t *src)
+{
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = src[3];
+    dst[4] = src[4];            /* the voicing word, copied as one 32-bit field */
+    dst[5] = src[5];
+    dst[6] = src[6];
+    dst[7] = src[7];
+    dst[0x40] = 0;
+    dst[0x41] = 0;
+    dst[0x42] = src[0x42];
+    memcpy(dst + 8, src + 8, 0x38 * sizeof(int16_t));
+}
+
+/*
+ * Vocoder_ResetFrameBuffer 0x00019D38.
+ *
+ * Fills the block's voicing-flag array according to the frame class in [0]:
+ *
+ *   1  voice     - Vocoder_BuildFrameResetPattern from the voicing word, which
+ *                  this library already has as ambe_unvoiced_voicing()
+ *   2  silence   - all flags cleared
+ *   3  tone      - cleared, then one or two flags set at the tone's own bins
+ *
+ * Any other class leaves the array untouched, which includes the erasure class.
+ *
+ * The tone branch needs Tone_ClassifyCtcssDcsCode 0x0002B0F4 to tell a CTCSS or
+ * DCS code from a single tone, and this project has no transcription of it.
+ * Tone frames are classified and muted rather than synthesised - README,
+ * "Limitations" - and the corpus holds two of them in 2052 frames, so the branch
+ * is left explicit and unimplemented rather than guessed at: it returns without
+ * touching the flags and says so.
+ */
+void ambe_frame_reset_buffer(int16_t *params, uint16_t *flags)
+{
+    switch (params[0]) {
+    case 1:
+        ambe_unvoiced_voicing(flags,
+                              (uint32_t)(((uint32_t)(uint16_t)params[5] << 16)
+                                         | (uint16_t)params[4]),
+                              params[6], params[2]);
+        return;
+    case 2:
+        memset(flags, 0, 0x38 * sizeof(uint16_t));
+        return;
+    case 3:
+        memset(flags, 0, 0x38 * sizeof(uint16_t));
+        /* the tone bins would be set here; see the comment above */
+        return;
+    default:
+        return;
+    }
+}
